@@ -1,0 +1,106 @@
+# File-provider integration using generated synthetic inputs, no game data.
+foreach(required REPLAY FIXTURE OUTPUT_ROOT)
+    if(NOT DEFINED ${required})
+        message(FATAL_ERROR "Missing ${required}")
+    endif()
+endforeach()
+string(RANDOM LENGTH 12 ALPHABET 0123456789abcdef run)
+set(root "${OUTPUT_ROOT}/environment-provider-${run}")
+file(MAKE_DIRECTORY "${root}")
+set(SNAPSHOT "${root}/world.bin")
+execute_process(COMMAND "${FIXTURE}" "${SNAPSHOT}" "${root}/sky.rgba"
+    RESULT_VARIABLE generated)
+if(NOT generated STREQUAL "0")
+    message(FATAL_ERROR "Cannot generate synthetic inputs: ${generated}")
+endif()
+foreach(mode missing empty directory malformed valid)
+    set(assets "${root}/${mode}")
+    file(MAKE_DIRECTORY "${assets}")
+    file(WRITE "${assets}/runtime-index.txt" "# rage-rmesh-index v2\n")
+    if(mode STREQUAL "directory")
+        file(MAKE_DIRECTORY "${assets}/environment-index.txt")
+    elseif(mode STREQUAL "malformed")
+        file(WRITE "${assets}/environment-index.txt" "96 0 128 sky.rgba\n")
+    elseif(mode STREQUAL "empty")
+        file(WRITE "${assets}/environment-index.txt" "")
+    elseif(mode STREQUAL "valid")
+        file(COPY "${root}/sky.rgba" DESTINATION "${assets}")
+        file(WRITE "${assets}/environment-index.txt" "96 4 4 sky.rgba\n")
+    endif()
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env RAGE_PORT_MODERN_ASSET_TRACE=1
+        "${REPLAY}" "${SNAPSHOT}" --assets "${assets}"
+        --sky-only --width 320 --height 240 --output "${assets}/frame.ppm"
+        WORKING_DIRECTORY "${assets}" RESULT_VARIABLE result TIMEOUT 45
+        OUTPUT_FILE "${assets}/game.log" ERROR_FILE "${assets}/game.log")
+    file(READ "${assets}/game.log" log)
+    if(mode STREQUAL "missing" AND NOT result STREQUAL "0" AND
+       log MATCHES "No supported SDL_GPU backend found|No available video device")
+        message("SKIP: environment provider requires an SDL GPU backend")
+        return()
+    endif()
+    if(mode STREQUAL "missing" OR mode STREQUAL "empty" OR mode STREQUAL "valid")
+        if(NOT result STREQUAL "0" OR NOT EXISTS "${assets}/frame.ppm")
+            message(FATAL_ERROR "${mode} index rejected: ${result}; ${log}")
+        endif()
+        if(mode STREQUAL "valid" AND NOT log MATCHES "panorama=loaded 4x4")
+            message(FATAL_ERROR "Valid texture was not loaded: ${log}")
+        endif()
+    elseif(mode STREQUAL "directory")
+        if(NOT result STREQUAL "1" OR NOT log MATCHES "environment asset index is not a readable file")
+            message(FATAL_ERROR "Directory accepted/misdiagnosed: ${result}; ${log}")
+        endif()
+    elseif(NOT result STREQUAL "1" OR NOT log MATCHES "invalid environment asset index .*:1")
+        message(FATAL_ERROR "Malformed index accepted/misdiagnosed: ${result}; ${log}")
+    endif()
+endforeach()
+# Same sky identity, different providers, retained device and frame number.
+# Submit the first source before replacement; the result must match a fresh
+# render of the destination, not the old resident sky texture.
+file(SHA256 "${root}/missing/frame.ppm" missing_hash)
+file(SHA256 "${root}/valid/frame.ppm" valid_hash)
+if(missing_hash STREQUAL valid_hash)
+    message(FATAL_ERROR "Synthetic sky controls must differ")
+endif()
+foreach(source missing valid)
+    if(source STREQUAL "missing")
+        set(destination valid)
+    else()
+        set(destination missing)
+    endif()
+    execute_process(COMMAND "${REPLAY}" "${SNAPSHOT}"
+        --assets "${root}/${source}" --reload-assets "${root}/${destination}"
+        --sky-only --width 320 --height 240 --output "${root}/reload-${source}.ppm"
+        RESULT_VARIABLE result TIMEOUT 45
+        OUTPUT_FILE "${root}/reload-${source}.log"
+        ERROR_FILE "${root}/reload-${source}.log")
+    if(NOT result STREQUAL "0")
+        message(FATAL_ERROR "Session replacement failed: ${root}/reload-${source}.log")
+    endif()
+    file(SHA256 "${root}/reload-${source}.ppm" actual)
+    file(SHA256 "${root}/${destination}/frame.ppm" expected)
+    if(NOT actual STREQUAL expected)
+        message(FATAL_ERROR "Stale sky after ${source} -> ${destination}: ${root}")
+    endif()
+endforeach()
+execute_process(COMMAND "${REPLAY}" "${SNAPSHOT}"
+    --assets "${root}/valid" --prepare-repeat 3 --sky-only
+    --width 320 --height 240 --output "${root}/repeated.ppm"
+    RESULT_VARIABLE result TIMEOUT 45
+    OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result STREQUAL "0" OR NOT error MATCHES "native-prepare-benchmark repeats=3 ")
+    message(FATAL_ERROR "Repeated preparation failed: ${output}${error}")
+endif()
+file(SHA256 "${root}/repeated.ppm" actual)
+file(SHA256 "${root}/valid/frame.ppm" expected)
+if(NOT actual STREQUAL expected)
+    message(FATAL_ERROR "Repeated preparation changed the fixed world: ${root}")
+endif()
+message(STATUS "Environment provider cases passed: ${root}")
+execute_process(COMMAND "${REPLAY}" "${SNAPSHOT}"
+    --assets "${root}/valid" --prepare-repeat 3
+    RESULT_VARIABLE result TIMEOUT 45 OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result STREQUAL "1" OR
+   NOT error MATCHES "refusing benchmark of incomplete native world" OR
+   error MATCHES "native-prepare-benchmark")
+    message(FATAL_ERROR "Incomplete benchmark was reported: ${output}${error}")
+endif()

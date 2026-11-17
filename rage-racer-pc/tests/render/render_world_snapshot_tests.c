@@ -1,0 +1,395 @@
+#include "render/render_world_snapshot.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static int failures;
+
+#define CHECK(condition) do {                                               \
+    if (!(condition)) {                                                     \
+        fprintf(stderr, "%s:%d: check failed: %s\n", __FILE__, __LINE__,   \
+                #condition);                                                \
+        failures++;                                                         \
+    }                                                                       \
+} while (0)
+
+static void FillTransform(RenderTransform *transform, float base) {
+    transform->position = (Vec3){base + 1, base + 2, base + 3};
+    transform->rotation = (Vec3){base + 4, base + 5, base + 6};
+    transform->scale = (Vec3){base + 7, base + 8, base + 9};
+    transform->orientation = (Quaternion){
+        base + 10, base + 11, base + 12, base + 13};
+    transform->hasOrientation = 1;
+}
+
+static void FillCamera(RenderCamera *camera, float base) {
+    FillTransform(&camera->transform, base);
+    camera->verticalFovDegrees = base + 20;
+    camera->nearPlane = base + 21;
+    camera->farPlane = base + 22;
+    camera->fogColor = (Vec3){base + 23, base + 24, base + 25};
+    camera->skyTopColor = (Vec3){base + 26, base + 27, base + 28};
+    camera->skyColor = (Vec3){base + 29, base + 30, base + 31};
+    camera->skyHorizonColor =
+        (Vec3){base + 32, base + 33, base + 34};
+    camera->skyBottomColor =
+        (Vec3){base + 35, base + 36, base + 37};
+    camera->skyAssetKey = (uint32_t)(base + 38);
+    camera->skyCloudRow = (uint32_t)(base + 39);
+    camera->hasSkyLayout = 1;
+    for (unsigned r = 0; r < 2; ++r)
+        for (unsigned c = 0; c < 8; ++c)
+            camera->skyLayout.tiles[r][c] = (uint8_t)(((unsigned)base + r + c) % 8);
+    camera->skyGridOrigin =
+        (Vec3){base + 40, base + 41, base + 42};
+    camera->skyGridColumn =
+        (Vec3){base + 43, base + 44, base + 45};
+    camera->skyGridRow =
+        (Vec3){base + 46, base + 47, base + 48};
+    camera->fogNear = base + 49;
+    camera->fogFar = base + 50;
+}
+
+static int SameTransform(const RenderTransform *a,
+                         const RenderTransform *b) {
+    return memcmp(&a->position, &b->position, sizeof(a->position)) == 0 &&
+           memcmp(&a->rotation, &b->rotation, sizeof(a->rotation)) == 0 &&
+           memcmp(&a->scale, &b->scale, sizeof(a->scale)) == 0 &&
+           memcmp(&a->orientation, &b->orientation,
+                  sizeof(a->orientation)) == 0 &&
+           a->hasOrientation == b->hasOrientation;
+}
+
+static int SameCamera(const RenderCamera *a, const RenderCamera *b) {
+    return SameTransform(&a->transform, &b->transform) &&
+           a->verticalFovDegrees == b->verticalFovDegrees &&
+           a->nearPlane == b->nearPlane && a->farPlane == b->farPlane &&
+           memcmp(&a->fogColor, &b->fogColor, sizeof(a->fogColor)) == 0 &&
+           memcmp(&a->skyTopColor, &b->skyTopColor,
+                  sizeof(a->skyTopColor)) == 0 &&
+           memcmp(&a->skyColor, &b->skyColor, sizeof(a->skyColor)) == 0 &&
+           memcmp(&a->skyHorizonColor, &b->skyHorizonColor,
+                  sizeof(a->skyHorizonColor)) == 0 &&
+           memcmp(&a->skyBottomColor, &b->skyBottomColor,
+                  sizeof(a->skyBottomColor)) == 0 &&
+           a->skyAssetKey == b->skyAssetKey &&
+           a->skyCloudRow == b->skyCloudRow &&
+           a->hasSkyLayout == b->hasSkyLayout &&
+           memcmp(&a->skyLayout, &b->skyLayout, sizeof(a->skyLayout)) == 0 &&
+           memcmp(&a->skyGridOrigin, &b->skyGridOrigin,
+                  sizeof(a->skyGridOrigin)) == 0 &&
+           memcmp(&a->skyGridColumn, &b->skyGridColumn,
+                  sizeof(a->skyGridColumn)) == 0 &&
+           memcmp(&a->skyGridRow, &b->skyGridRow,
+                  sizeof(a->skyGridRow)) == 0 &&
+           a->fogNear == b->fogNear && a->fogFar == b->fogFar;
+}
+
+static int SameLight(const RenderDirectionalLight *a,
+                     const RenderDirectionalLight *b) {
+    return memcmp(a, b, sizeof(*a)) == 0;
+}
+
+static void TestRoundTrip(void) {
+    const char *path = "render-world-snapshot-test.bin";
+    RenderMeshInstance instances[2] = {0};
+    RenderWorld world = {0};
+    RenderWorldSnapshot loaded = {0};
+    SpotLight lamp = {
+        .position = {12, 5, -9}, .range = 80,
+        .direction = {0, 0, -1}, .outerCos = 0.7f,
+        .color = {3, 2, 1}, .innerCos = 0.95f,
+    };
+    CHECK(RenderWorldSubmitSpotLight(&world, &lamp));
+    world.frame = UINT64_C(0x123456789abcdef0);
+
+    world.light.direction = (Vec3){.1f, .2f, .3f};
+    world.light.ambientColor = (Vec3){.4f, .5f, .6f};
+    world.light.diffuseColor = (Vec3){.7f, .8f, .9f};
+    FillCamera(&world.camera, 1);
+    FillCamera(&world.previousCamera, 40);
+    FillCamera(&world.mirrorCamera, 80);
+    FillCamera(&world.previousMirrorCamera, 120);
+    world.hasCamera = 1;
+    world.hasMirrorCamera = 1;
+    world.mirrorActive = 1;
+    world.mirrorPanelY = -36.5f;
+    world.previousMirrorPanelY = -37.5f;
+    world.instances = instances;
+    world.instanceCapacity = 2;
+    world.instanceCount = 2;
+    world.overflowCount = 3;
+    instances[0].entity = 11;
+    instances[0].mesh = 12;
+    instances[0].assetSet = RAGE_RENDER_ASSET_TERRAIN;
+    instances[0].assetKey = 13;
+    instances[0].material = 14;
+    instances[0].component = 15;
+    instances[0].materialVariant = 16;
+    instances[0].hasCarPaint = 1;
+    instances[0].carPaintColor1 = 17;
+    instances[0].carPaintColor2 = 18;
+    instances[0].textureScrollU = 19;
+    instances[0].lightInfluence = 0.4f;
+    instances[0].lamps = (CarLights){1.0f, 0.2f, 1.0f, 1, 0.3f};
+    instances[0].environmentLight = (Vec3){.1f, .2f, .3f};
+    instances[0].depthBias = -2.5f;
+    FillTransform(&instances[0].transform, 160);
+    FillTransform(&instances[0].previousTransform, 180);
+    instances[0].flags = RAGE_RENDER_INSTANCE_ENABLE_FOG |
+                         RAGE_RENDER_INSTANCE_DEPTH_DECAL;
+    instances[0].pass = RAGE_RENDER_PASS_MIRROR;
+    instances[1] = instances[0];
+    instances[1].entity = 21;
+    instances[1].assetSet = RAGE_RENDER_ASSET_TRACK_MODEL_BANK_2;
+    instances[1].pass = RAGE_RENDER_PASS_MAIN;
+
+    CHECK(RenderWorldSnapshotWrite(path, &world));
+    CHECK(RenderWorldSnapshotRead(path, &loaded));
+    CHECK(loaded.world.frame == world.frame);
+    CHECK(SameLight(&loaded.world.light, &world.light));
+    CHECK(loaded.world.spotLightCount == 1);
+    CHECK(memcmp(&loaded.world.spotLights[0], &lamp, sizeof(lamp)) == 0);
+    CHECK(SameCamera(&loaded.world.camera, &world.camera));
+    CHECK(SameCamera(&loaded.world.previousCamera, &world.previousCamera));
+    CHECK(SameCamera(&loaded.world.mirrorCamera, &world.mirrorCamera));
+    CHECK(SameCamera(&loaded.world.previousMirrorCamera,
+                     &world.previousMirrorCamera));
+    CHECK(loaded.world.instanceCount == 2);
+    CHECK(loaded.world.instanceCapacity == 2);
+    CHECK(loaded.world.overflowCount == 3);
+    CHECK(loaded.instances == loaded.world.instances);
+    CHECK(loaded.instances[0].entity == 11);
+    CHECK(loaded.instances[0].assetSet == RAGE_RENDER_ASSET_TERRAIN);
+    CHECK(loaded.instances[0].material == 14);
+    CHECK(loaded.instances[0].lightInfluence == 0.4f);
+    CHECK(loaded.instances[0].lamps.headlights == 1.0f);
+    CHECK(loaded.instances[0].lamps.tail == 0.2f);
+    CHECK(loaded.instances[0].lamps.stop == 1.0f);
+    CHECK(loaded.instances[0].lamps.automatic == 1);
+    CHECK(loaded.instances[0].lamps.darkSeconds == 0.3f);
+    CHECK(loaded.instances[0].depthBias == -2.5f);
+    CHECK(SameTransform(&loaded.instances[0].transform,
+                        &instances[0].transform));
+    CHECK(SameTransform(&loaded.instances[0].previousTransform,
+                        &instances[0].previousTransform));
+    CHECK(loaded.instances[0].flags == instances[0].flags);
+    CHECK(loaded.instances[0].pass == RAGE_RENDER_PASS_MIRROR);
+    CHECK(loaded.instances[1].entity == 21);
+    CHECK(loaded.instances[1].assetSet ==
+          RAGE_RENDER_ASSET_TRACK_MODEL_BANK_2);
+    RenderWorldSnapshotRelease(&loaded);
+    remove(path);
+}
+
+static void TestRejectsInvalidFile(void) {
+    const char *path = "render-world-snapshot-invalid.bin";
+    RenderWorldSnapshot loaded = {0};
+    FILE *file = fopen(path, "wb");
+    CHECK(file != NULL);
+    if (file != NULL) {
+        fwrite("not a frame", 1, 11, file);
+        fclose(file);
+    }
+    CHECK(!RenderWorldSnapshotRead(path, &loaded));
+    remove(path);
+}
+
+static void TestPreservesReservedOutput(void) {
+    const char *path = "render-world-reserved.bin";
+    const char *temporary = "render-world-reserved.bin.tmp";
+    const char *paths[] = {path, temporary};
+    RenderWorld world = {0};
+    for (size_t i = 0; i < 2; ++i) {
+        FILE *file = fopen(paths[i], "wbx");
+        CHECK(file != NULL);
+        if (!file) return;
+        CHECK(fwrite("keep", 1, 4, file) == 4);
+        CHECK(fclose(file) == 0);
+    }
+    CHECK(!RenderWorldSnapshotWrite(path, &world));
+    for (size_t i = 0; i < 2; ++i) {
+        char bytes[5] = {0};
+        FILE *file = fopen(paths[i], "rb");
+        CHECK(file != NULL);
+        if (!file) return;
+        CHECK(fread(bytes, 1, sizeof(bytes), file) == 4);
+        CHECK(!strcmp(bytes, "keep"));
+        CHECK(fclose(file) == 0);
+        CHECK(remove(paths[i]) == 0);
+    }
+    CHECK(RenderWorldSnapshotWrite(path, &world));
+    RenderWorldSnapshot read = {0};
+    CHECK(RenderWorldSnapshotRead(path, &read));
+    RenderWorldSnapshotRelease(&read);
+    CHECK(remove(path) == 0);
+}
+
+static void TestRejectsInvalidWorldBounds(void) {
+    const char *path = "render-world-snapshot-invalid-bounds.bin";
+    RenderMeshInstance instance = {0};
+    RenderWorld world = {0};
+
+    world.instances = &instance;
+    world.instanceCapacity = 1;
+    world.instanceCount = 2;
+    {
+        FILE *file = fopen(path, "wb");
+        CHECK(file != NULL);
+        if (file != NULL) {
+            CHECK(fwrite("keep", 1, 4, file) == 4);
+            CHECK(fclose(file) == 0);
+        }
+    }
+    CHECK(!RenderWorldSnapshotWrite(path, &world));
+    {
+        char contents[4];
+        FILE *file = fopen(path, "rb");
+        CHECK(file != NULL);
+        if (file != NULL) {
+            CHECK(fread(contents, 1, sizeof(contents), file) ==
+                  sizeof(contents));
+            CHECK(memcmp(contents, "keep", sizeof(contents)) == 0);
+            CHECK(fclose(file) == 0);
+        }
+    }
+    remove(path);
+}
+
+static void TestSkyLayoutVersionCompatibility(void) {
+    const char *path = "render-world-sky-compat.bin";
+    RenderWorld world = {0};
+    RenderWorldSnapshot loaded = {0};
+    unsigned char bytes[2048], legacy[2048];
+    size_t size = 0, used = 0;
+    CHECK(RenderWorldSnapshotWrite(path, &world));
+    FILE *file = fopen(path, "rb");
+    CHECK(file != NULL);
+    if (file == NULL) return;
+    size = fread(bytes, 1, sizeof(bytes), file);
+    CHECK(fclose(file) == 0);
+    CHECK(size > 833 && size < sizeof(bytes));
+    if (size <= 833 || size == sizeof(bytes)) { remove(path); return; }
+    /* v6 camera is 177 bytes; v7 adds flag + 16 tiles; v11 adds the in-car flag. The first camera
+     * starts after the 56-byte frame/light prefix. hasCamera separates the
+     * first pair from the mirror pair. These are wire offsets, not sizeof(C). */
+    static const size_t extension[] = {233, 428, 624, 819};
+    CHECK(bytes[8] == 11);
+    /* v8 appends a light count; an empty v6 world has no such tail. */
+    for (size_t i = 0; i < size - 4; ++i) {
+        int skip = 0;
+        for (size_t j = 0; j < 4; ++j)
+            if (i >= extension[j] && i < extension[j] + 18) skip = 1;
+        if (!skip) legacy[used++] = bytes[i];
+    }
+    legacy[8] = 6;
+    file = fopen(path, "wb");
+    CHECK(file != NULL);
+    if (file == NULL) return;
+    CHECK(fwrite(legacy, 1, used, file) == used);
+    CHECK(fclose(file) == 0);
+    CHECK(RenderWorldSnapshotRead(path, &loaded));
+    CHECK(loaded.world.camera.hasSkyLayout == 0);
+    CHECK(loaded.world.previousCamera.hasSkyLayout == 0);
+    CHECK(loaded.world.mirrorCamera.hasSkyLayout == 0);
+    CHECK(loaded.world.previousMirrorCamera.hasSkyLayout == 0);
+    RenderWorldSnapshotRelease(&loaded);
+    bytes[233] = 1;
+    bytes[234] = 8; /* Invalid declared tile, rejected while reading v7. */
+    file = fopen(path, "wb");
+    CHECK(file != NULL);
+    if (file == NULL) return;
+    CHECK(fwrite(bytes, 1, size, file) == size);
+    CHECK(fclose(file) == 0);
+    CHECK(!RenderWorldSnapshotRead(path, &loaded));
+    remove(path);
+}
+
+static void TestReusableCapacity(void) {
+    RenderMeshInstance instances[4] = {0};
+    for (unsigned i = 0; i < 4; ++i) instances[i].assetKey = 10 + i;
+    RenderWorld world = {0};
+    world.instances = instances;
+    world.instanceCapacity = 4;
+    world.instanceCount = 1;
+    RenderWorldSnapshot snapshot = {0};
+    CHECK(RenderWorldSnapshotCopy(&snapshot, &world));
+    world.instanceCount = 4;
+    CHECK(RenderWorldSnapshotCopy(&snapshot, &world));
+    RenderMeshInstance *capacity = snapshot.instances;
+    CHECK(snapshot.world.instanceCapacity == 4);
+    CHECK(snapshot.instances[3].assetKey == 13);
+    world.instanceCount = 2;
+    CHECK(RenderWorldSnapshotCopy(&snapshot, &world));
+    CHECK(snapshot.instances == capacity && snapshot.world.instanceCount == 2);
+    world.instances = NULL;
+    world.instanceCount = world.instanceCapacity = 0;
+    CHECK(RenderWorldSnapshotCopy(&snapshot, &world));
+    CHECK(snapshot.instances == capacity && snapshot.world.instanceCount == 0);
+    CHECK(snapshot.world.instanceCapacity == 4);
+    world.instances = instances;
+    world.instanceCount = world.instanceCapacity = 4;
+    instances[3].assetKey = 99;
+    CHECK(RenderWorldSnapshotCopy(&snapshot, &world));
+    CHECK(snapshot.instances == capacity && snapshot.instances[3].assetKey == 99);
+    instances[3].assetKey = 100;
+    CHECK(snapshot.instances[3].assetKey == 99);
+    /* A subrange may alias owned storage; moving it must preserve ownership. */
+    world = snapshot.world;
+    world.instances++;
+    world.instanceCount = world.instanceCapacity = 3;
+    CHECK(RenderWorldSnapshotCopy(&snapshot, &world));
+    CHECK(snapshot.instances == capacity && snapshot.instances[0].assetKey == 11);
+    CHECK(snapshot.instances[2].assetKey == 99);
+    RenderWorldSnapshotRelease(&snapshot);
+    CHECK(snapshot.instances == NULL && snapshot.world.instances == NULL);
+}
+
+int main(void) {
+    TestReusableCapacity();
+    {
+        RenderMeshInstance instance = {0};
+        instance.assetKey = 42;
+        RenderWorld world = {0};
+        world.instances = &instance;
+        world.instanceCount = world.instanceCapacity = 1;
+        world.frame = 123;
+        FillCamera(&world.camera, 0);
+        RenderWorldSnapshot copy = {0};
+        CHECK(RenderWorldSnapshotCopy(&copy, &world));
+        CHECK(copy.instances != &instance && copy.world.instances == copy.instances);
+        CHECK(copy.instances[0].assetKey == 42 && copy.world.frame == 123);
+        CHECK(SameCamera(&copy.world.camera, &world.camera));
+        instance.assetKey = 99;
+        CHECK(copy.instances[0].assetKey == 42);
+        RenderMeshInstance *reused = copy.instances;
+        CHECK(RenderWorldSnapshotCopy(&copy, &copy.world));
+        CHECK(copy.instances == reused);
+        CHECK(copy.instances[0].assetKey == 42);
+        world.instanceCapacity = 0;
+        CHECK(!RenderWorldSnapshotCopy(&copy, &world));
+        CHECK(copy.instances[0].assetKey == 42);
+        CHECK(!RenderWorldSnapshotCopy(&copy, NULL));
+        CHECK(!RenderWorldSnapshotCopy(NULL, &world));
+        const char *path = "render_snapshot_replace.tmp";
+        CHECK(RenderWorldSnapshotWrite(path, &copy.world));
+        CHECK(RenderWorldSnapshotRead(path, &copy));
+        CHECK(copy.instances[0].assetKey == 42);
+        CHECK(RenderWorldSnapshotRead(path, &copy));
+        RenderMeshInstance *owned = copy.instances;
+        FILE *broken = fopen(path, "wb");
+        CHECK(broken != NULL);
+        if (broken) { CHECK(fputs("broken", broken) >= 0); CHECK(fclose(broken) == 0); }
+        CHECK(!RenderWorldSnapshotRead(path, &copy));
+        CHECK(copy.instances == owned && copy.instances[0].assetKey == 42);
+        CHECK(remove(path) == 0);
+        RenderWorldSnapshotRelease(&copy);
+        RenderWorldSnapshotRelease(&copy);
+    }
+    TestRoundTrip();
+    TestRejectsInvalidFile();
+    TestPreservesReservedOutput();
+    TestRejectsInvalidWorldBounds();
+    TestSkyLayoutVersionCompatibility();
+    return failures == 0 ? 0 : 1;
+}

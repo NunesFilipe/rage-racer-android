@@ -1,0 +1,90 @@
+name: Compiled texture and archive contracts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/port/texture_patch.*'
+      - 'src/render/legacy_texture_index.h'
+      - 'src/render/render_material*'
+      - 'src/render/authored_car_surface*'
+      - 'src/render/asset_path*'
+      - 'src/port/modern/modern_material_transaction.h'
+      - 'src/port/modern/modern_asset_image.h'
+      - 'src/port/modern/modern_upload_queue.h'
+      - 'tests/disc/modern_upload_queue_tests.c'
+      - 'launcher/native/mod_inventory.h'
+      - 'src/render/mod_file_policy.*'
+      - 'tests/disc/mod_inventory_tests.c'
+      - 'tests/disc/material_transaction_tests.c'
+      - 'tests/render/render_material_tests.c'
+      - 'tests/render/texture_span_tests.c'
+      - 'tools/rage_extract.c'
+      - 'tools/rage_pack.c'
+      - 'tests/disc/mod_archive_tests.c'
+      - 'tests/disc/texture_patch_tests.c'
+      - 'tests/texture_contract/**'
+      - 'tests/native_fixture_contract/**'
+      - 'tests/render/native_asset_fixture.c'
+      - 'external/yyjson/**'
+      - 'external/psyz'
+      - 'external/libchdr'
+      - '.gitmodules'
+      - '.github/workflows/texture-contract-check.yml'
+  pull_request:
+    paths:
+      - 'src/port/texture_patch.*'
+      - 'src/render/legacy_texture_index.h'
+      - 'src/render/render_material*'
+      - 'src/render/authored_car_surface*'
+      - 'src/render/asset_path*'
+      - 'src/port/modern/modern_material_transaction.h'
+      - 'src/port/modern/modern_asset_image.h'
+      - 'src/port/modern/modern_upload_queue.h'
+      - 'tests/disc/modern_upload_queue_tests.c'
+      - 'launcher/native/mod_inventory.h'
+      - 'src/render/mod_file_policy.*'
+      - 'tests/disc/mod_inventory_tests.c'
+      - 'tests/disc/material_transaction_tests.c'
+      - 'tests/render/render_material_tests.c'
+      - 'tests/render/texture_span_tests.c'
+      - 'tools/rage_extract.c'
+      - 'tools/rage_pack.c'
+      - 'tests/disc/mod_archive_tests.c'
+      - 'tests/disc/texture_patch_tests.c'
+      - 'tests/texture_contract/**'
+      - 'tests/native_fixture_contract/**'
+      - 'tests/render/native_asset_fixture.c'
+      - 'external/yyjson/**'
+      - 'external/psyz'
+      - 'external/libchdr'
+      - '.gitmodules'
+      - '.github/workflows/texture-contract-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch only required pinned submodules
+        shell: bash
+        run: |
+          git submodule update --init --depth 1 external/psyz external/libchdr
+          git -C external/psyz submodule update --init --depth 1 external/SDL
+      - name: Build and test compiled contracts
+        run: cmake -P tests/texture_contract/run.cmake
+      - name: Sanitized material and texture contracts
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S tests/texture_contract -B build/asset-sanitized -DCMAKE_BUILD_TYPE=Debug -DRAGE_ASSET_SANITIZERS=ON
+          cmake --build build/asset-sanitized --parallel 4
+          ctest --test-dir build/asset-sanitized --output-on-failure

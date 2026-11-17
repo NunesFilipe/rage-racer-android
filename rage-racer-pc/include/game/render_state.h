@@ -1,0 +1,193 @@
+#ifndef GAME_RENDER_STATE_H
+#define GAME_RENDER_STATE_H
+
+#include "common.h"
+#include "game/camera_types.h"
+
+#include <stddef.h>
+#include "game/render_types.h"
+#include "psyq/gte.h"
+
+typedef enum GameRenderPassMode {
+    GAME_RENDER_PASS_MIRROR = 9,
+    GAME_RENDER_PASS_MAIN = 10,
+} GameRenderPassMode;
+
+typedef struct GameDrawContext {
+    void *packetCursor;
+    GameOrderingTableEntry *orderingTable;
+    /* Screen clip rectangle every emitter rejects primitives against.
+     * menu/frontend.c raises clipY1 to 0x1E0 for the 480-line modes. */
+    s16 clipX0;
+    s16 clipY0;
+    s16 clipX1;
+    s16 clipY1;
+} GameDrawContext;
+
+typedef struct GameGeometryContext {
+    Matrix matrix;
+    const void *courseBank;
+    const void *const *modelModels;
+    const void *modelTable1;
+    const void *modelNormals;
+    const void *const *cellTable;
+    const void *cellFaces;
+    u8 ft4Color[4];
+    u8 gt4Color[4];
+    s32 envMode4;
+} GameGeometryContext;
+
+typedef struct GameRenderPassState {
+    s32 otShift;
+    s32 orderingFlag;
+    s32 faceOtShift;
+    GameRenderPassMode mode;
+} GameRenderPassState;
+
+typedef struct MirrorRenderState {
+    Matrix viewMatrix;
+    Matrix savedMatrix;
+    s16 enabled;
+} MirrorRenderState;
+
+/*
+ * The working state the renderer and the car code keep between calls.
+ *
+ * On the PS1 all of this lived in the kilobyte of fast RAM at 0x1F800000, and
+ * the game packed unrelated things into it by byte offset, overlaying two
+ * different structures on the same address because only one of them was in
+ * use at a time. There is no fast RAM here and nothing to pack into, so each
+ * piece has its own storage of its own type; what is left is an ordinary
+ * struct of named fields.
+ */
+typedef struct GameRenderState {
+    GameDrawContext draw;
+    GameGeometryContext geometry;
+    GameRenderPassState pass;
+    MirrorRenderState mirror;
+} GameRenderState;
+
+extern GameRenderState g_RenderState;
+
+/*
+ * A copy of the camera the camera code works in before storing it back. It
+ * exists because the routines that build a view read the current one while
+ * they compute the next, and because two of them decide part way through not
+ * to store anything at all.
+ *
+ * The position and the angles are each taken as a three-word block as well as
+ * one word at a time, so they have to stay adjacent.
+ */
+typedef GameCameraState GameViewWork;
+
+_Static_assert(offsetof(GameViewWork, z) == offsetof(GameViewWork, x) + 8,
+               "the camera position must stay one block");
+_Static_assert(offsetof(GameViewWork, angleZ) ==
+                   offsetof(GameViewWork, angleX) + 8,
+               "the camera angles must stay one block");
+
+typedef union CarTrackRadius {
+    s32 value;
+    struct {
+        u16 low;
+        u16 high;
+    } half;
+} CarTrackRadius;
+
+typedef struct CarTrackWork {
+    s32 arcCenterX;
+    s32 arcCenterZ;
+    s32 carToCenterX;
+    s32 carToCenterZ;
+    CarTrackRadius carRadius;
+    CarTrackRadius pointRadius;
+    CarTrackRadius nextPointRadius;
+    s32 pointToCenterX;
+    s32 nextPointToCenterX;
+    s32 pointToCenterZ;
+    s32 nextPointToCenterZ;
+    s32 headingSin;
+    s32 headingCos;
+    s32 trackContact;
+    MATRIX edgeCorrectionMatrix;
+    SVec edgeOffset;
+    LVec edgeCorrection;
+    s16 curveMode;
+    s16 arcIndex;
+    s16 arcSpan;
+    s16 sweptAngle;
+    s16 pointAngle;
+    s16 nextPointAngle;
+    s16 arcLateral;
+    s16 trackWidth;
+    s16 rightHalfWidth;
+    s16 leftHalfWidth;
+    s16 relativeHeading;
+    s16 crossSlope;
+    s16 heading;
+    s16 surfacePitch;
+    s16 camberAngle;
+    u16 segmentLength;
+} CarTrackWork;
+
+/* Where the car code works out where it sits on the track. */
+extern CarTrackWork g_CarTrackWork;
+
+/*
+ * The primitive-packing cursor. Every emitter packs a GPU packet at it, bumps
+ * it past the packet and stores it back, so each one spells the slot with the
+ * packet type it is building. RENDER_PRIM_CURSOR_AS gives that type without
+ * repeating the address; The retail code also carried the cursor
+ * as an integer in this slot; reading it back that way would take half of a
+ * pointer here, so that spelling is gone.
+ */
+#define RENDER_PRIM_CURSOR_AS(type) ((type *)g_RenderState.draw.packetCursor)
+#define RENDER_PRIM_CURSOR          g_RenderState.draw.packetCursor
+
+/* Ordering table the emitters link finished packets into. */
+#define RENDER_OT_BASE g_RenderState.draw.orderingTable
+
+static inline void LoadViewWork(GameViewWork *view,
+                                const GameCameraState *camera) {
+    *view = *camera;
+}
+
+static inline void StoreViewWork(GameCameraState *camera,
+                                 const GameViewWork *view) {
+    *camera = *view;
+}
+
+/* Course object bank. SubmitCourseModel / SubmitCourseModel2 (0x800296BC,
+ * 0x80029E58) load it and index by model id; size is g_CourseModelCount. */
+
+/* Model bank cursor, pointed at one g_ModelBanks entry by SelectModelBank.
+ * MODELS is the model pointer array (bank + 0xC) that SubmitModel indexes by
+ * id << 2 (0x80028DEC); NORMALS is bank[2] rebased, the 8-byte SVECTORs the
+ * Emit*G4 / Emit*GT4 quad builders index by id << 3 and feed to ncct/nccs
+ * (0x80029168). TABLE1 is bank[1] rebased; nothing in the disassembled engine
+ * reads it, so it is named for where it comes from, not what it holds. */
+
+/* Terrain: the per-cell record array SubmitTerrainCells indexes by cell id
+ * (0x80028078) and the face array SubmitTerrainCellFaces walks (0x80028168). */
+
+/* The srav amount that turns a transformed Z into an ordering-table index:
+ * OT_SHIFT on the cell-face path (0x800283C0), FACE_OT_SHIFT on the mode-1
+ * path, where it is read as a halfword (0x80028474). InitRenderState sets
+ * OT_SHIFT from its parameter, 5 for the race scene and 1 for two menus. */
+
+/* Mirror flag. Non-zero makes the engine negate the GTE rotation matrix
+ * (0x80028000, 0x80028E00); track/draw_terrain_cells.c compares it against
+ * g_MirrorMode. Same word as the struct's `orderingFlag`. */
+
+/* Two packed GTE RGBC words, read whole with lwc2 into cop2 register 6:
+ * EmitPolyFT4Fog takes 0x70 (0x80029468), EmitPolyGT4Fog takes 0x74
+ * (0x80029620). The fourth byte is the GPU primitive code the emitter stamps
+ * into the packet, 0x2C for a 40-byte POLY_FT4 and 0x3C for a 52-byte
+ * POLY_GT4. */
+
+/* g_IsEnvironmentMode4, forwarded here by every car and track renderer for the
+ * GTE engine to read. Spelled as a macro rather than an `extern ... asm()`
+ * symbol on purpose: the extern form lets gcc 2.6.3 hold the address in a
+ * register across calls, which changes the output. */
+
+#endif

@@ -1,0 +1,253 @@
+#include "common.h"
+#include "game/asset.h"
+#include "game/car.h"
+#include "game/menu.h"
+#include "game/race.h"
+
+static MenuWidgets s_menuWidgets;
+#include "game/render_state.h"
+
+#include <stdio.h>
+#include <string.h>
+
+extern s32 g_MenuHandlerIndex;
+extern s32 g_MenuOutgoingHandlerIndex;
+extern s32 g_MenuScreen;
+
+void MenuActivateScreen(s32 screen) {
+    g_MenuScreen = screen;
+    g_MenuHandlerIndex = screen;
+}
+void MenuBeginExit(s32 screen) {
+    g_MenuHandlerIndex = -1;
+    g_MenuOutgoingHandlerIndex = screen;
+}
+
+s32 GameMenuBusy;
+CarModelAsset *g_CarModelAsset;
+CarEntry *g_CarTable;
+s16 g_GrandPrixMode;
+RaceSession g_RaceSession;
+s32 g_MenuHandlerIndex;
+s32 g_MenuOutgoingHandlerIndex;
+s32 g_MenuOverlayPattern;
+s32 g_MenuScreen;
+s32 g_MenuViewOffset;
+s32 g_MenuViewOffsetTarget;
+TimedDrawCommand g_NativeCustomizeMenuScriptGp[13];
+TimedDrawCommand g_NativeCustomizeMenuScriptTimeAttack[11];
+TimedDrawCommand g_NativeMenuDialogPanelLowerScript[8];
+TimedDrawCommand g_NativeMenuDialogPanelUpperScript[4];
+TimedDrawCommand g_NativeTransmissionUnavailableScript[4];
+u16 g_PadPressed;
+s32 g_PlayerCarIndex;
+GameRenderState g_RenderState;
+CarEntry g_TimeAttackCars[GAME_CAR_COUNT];
+TimedDrawCommand g_UiChromeScript[1];
+TimedDrawCommand g_UiChromeScript2[1];
+s32 g_UiScriptProgress;
+s32 g_UiScriptProgress2;
+
+static CarEntry s_cars[GAME_CAR_COUNT];
+static CarModelAsset s_model;
+static Customize s_customize;
+static CarSpecGraph s_carSpecGraph;
+Customize *MenuCustomize(void) { return &s_customize; }
+CarSpecGraph *MenuCarSpecGraph(void) { return &s_carSpecGraph; }
+
+static s32 s_lastCue;
+
+s32 RunTimedDrawScript(const TimedDrawCommand *commands, s32 *progress,
+                       s32 step) {
+    (void)commands;
+    if (step < 0) *progress = 0;
+    return 1;
+}
+void PlaySoundCue(s32 cue) { s_lastCue = cue; }
+void DrawCarNamePlate(MenuWidgets *widgets) {
+    s32 step = widgets->carNameStep;
+    s32 model = widgets->carNameModel;
+    (void)step;
+    (void)model;
+}
+void DrawMenuCarView(void) {}
+void DrawFadingMenuSprites(s32 progress, s32 count, s32 slot) {
+    (void)progress;
+    (void)count;
+    (void)slot;
+}
+void DrawMenuCursorBox(s32 x, s32 y, s32 w, s32 h, s32 flash) {
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    (void)flash;
+}
+void DrawSprite(GameOrderingTableEntry *ot, s16 x, s16 y, s16 w, u16 h,
+                u16 u, u16 v, u8 r, u8 g, u8 b, u16 clut, s32 shade,
+                s32 semi, u32 flags) {
+    (void)ot;
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    (void)u;
+    (void)v;
+    (void)r;
+    (void)g;
+    (void)b;
+    (void)clut;
+    (void)shade;
+    (void)semi;
+    (void)flags;
+}
+void GameDrawMenuButton(s32 x, s32 y, s32 w, s32 h, u8 r, u8 g, u8 b) {
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    (void)r;
+    (void)g;
+    (void)b;
+}
+void DrawTireCompoundSlider(Customize *customize, u8 compound, s32 flash) {
+    (void)customize;
+    (void)compound;
+    (void)flash;
+}
+
+#define CHECK(condition)                                                       \
+    do {                                                                       \
+        if (!(condition)) {                                                    \
+            fprintf(stderr, "check failed at line %d: %s\n", __LINE__,       \
+                    #condition);                                               \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+static void Reset(void) {
+    memset(s_cars, 0, sizeof(s_cars));
+    memset(g_TimeAttackCars, 0, sizeof(g_TimeAttackCars));
+    memset(&s_model, 0, sizeof(s_model));
+    g_CarTable = s_cars;
+    g_CarModelAsset = &s_model;
+    g_PlayerCarIndex = 3;
+    g_GrandPrixMode = 1;
+    g_RaceSession.kind = RACE_SESSION_STANDARD;
+    s_customize.option = 0;
+    s_customize.popupScript = NULL;
+    GameMenuBusy = 0;
+    g_PadPressed = 0;
+    g_UiScriptProgress = 0;
+    g_UiScriptProgress2 = 0;
+    s_customize.modalCursor = 0;
+    s_customize.confirmTimer = 0;
+    s_lastCue = -1;
+}
+
+int main(void) {
+    Reset();
+    g_PadPressed = PAD_UP;
+    UpdateCustomizeScreen();
+    CHECK(s_customize.option == 3 && s_lastCue == 1);
+
+    Reset();
+    s_customize.option = 3;
+    g_PadPressed = PAD_DOWN;
+    UpdateCustomizeScreen();
+    CHECK(s_customize.option == 0 && s_lastCue == 1);
+
+    Reset();
+    g_GrandPrixMode = 0;
+    g_PadPressed = PAD_UP;
+    UpdateCustomizeScreen();
+    CHECK(s_customize.option == 2);
+
+    /* A custom race runs in time-attack mode but keeps the DESIGN row, so
+     * its cars can be painted (#50). */
+    Reset();
+    g_GrandPrixMode = 0;
+    g_RaceSession.kind = RACE_SESSION_CUSTOM;
+    g_PadPressed = PAD_UP;
+    UpdateCustomizeScreen();
+    CHECK(s_customize.option == 3);
+
+    Reset();
+    g_GrandPrixMode = 0;
+    g_RaceSession.kind = RACE_SESSION_CUSTOM;
+    s_customize.option = 2;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateCustomizeScreen();
+    CHECK(GameMenuBusy == 1 && s_lastCue == 2);
+
+    Reset();
+    g_CarTable = NULL;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateCustomizeScreen();
+    CHECK(GameMenuBusy == 0 && s_lastCue == -1);
+
+    Reset();
+    g_PlayerCarIndex = GAME_CAR_COUNT;
+    s_customize.option = 1;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateCustomizeScreen();
+    CHECK(GameMenuBusy == -3 && s_lastCue == 5);
+
+    Reset();
+    s_cars[3].tireCompound = UINT8_MAX;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateCustomizeScreen();
+    CHECK(GameMenuBusy == -1 && s_customize.modalCursor == 4);
+
+    GameMenuBusy = -5;
+    s_customize.modalCursor = UINT8_MAX;
+    s_customize.confirmTimer = 0;
+    UpdateCustomizeScreen();
+    CHECK(GameMenuBusy == 0 && s_cars[3].tireCompound == 4 &&
+          g_TimeAttackCars[3].tireCompound == 4);
+
+    Reset();
+    s_model.transmissionAvailable = 1;
+    s_cars[3].transmission = 7;
+    s_customize.option = 1;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateCustomizeScreen();
+    CHECK(GameMenuBusy == -2 && s_customize.modalCursor == 1);
+
+    g_PadPressed = PAD_CONFIRM;
+    UpdateCustomizeScreen();
+    CHECK(GameMenuBusy == -6 && s_cars[3].transmission == 1 &&
+          g_TimeAttackCars[3].transmission == 1);
+
+    Reset();
+    s_model.transmissionAvailable = 1;
+    GameMenuBusy = -2;
+    s_customize.modalCursor = 1;
+    g_CarModelAsset = NULL;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateCustomizeScreen();
+    CHECK(GameMenuBusy == 0 && s_cars[3].transmission == 0 &&
+          g_TimeAttackCars[3].transmission == 0);
+
+    Reset();
+    g_GrandPrixMode = 0;
+    s_customize.option = INT32_MAX;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateCustomizeScreen();
+    CHECK(s_customize.option == 2 && GameMenuBusy == 2);
+
+    Reset();
+    GameMenuBusy = -99;
+    UpdateCustomizeScreen();
+    CHECK(GameMenuBusy == 0);
+
+    Reset();
+    GameMenuBusy = 99;
+    UpdateCustomizeScreen();
+    CHECK(GameMenuBusy == 0);
+
+    puts("customize screen tests passed");
+    return 0;
+}
+
+MenuWidgets *MenuWidgetState(void) { return &s_menuWidgets; }

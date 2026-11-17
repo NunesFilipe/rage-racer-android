@@ -1,0 +1,491 @@
+#ifndef GAME_MENU_INTERNAL_H
+#define GAME_MENU_INTERNAL_H
+
+#include "game/menu.h"
+#include "game/menu_types.h"
+#include "game/team_logo.h"
+#include "psyq/gpu.h"
+
+static inline s32 AddClampedMenuValue(s32 value, s32 delta, s32 minimum,
+                                      s32 maximum) {
+    int64_t updated;
+
+    if (minimum > maximum) {
+        return minimum;
+    }
+    updated = (int64_t)value + delta;
+    if (updated < minimum) {
+        return minimum;
+    }
+    if (updated > maximum) {
+        return maximum;
+    }
+    return (s32)updated;
+}
+
+static inline s32 WrapMenuIndex(s32 index, s32 delta, s32 count) {
+    int64_t wrapped;
+
+    if (count <= 0) {
+        return 0;
+    }
+    wrapped = ((int64_t)index + delta) % count;
+    if (wrapped < 0) {
+        wrapped += count;
+    }
+    return (s32)wrapped;
+}
+
+/* Screen draw entry points use step zero as a reset command. Other steps move
+ * their fade within the brightness range accepted by the menu renderer. */
+static inline s32 AdvanceMenuFade(s32 *progress, s32 step) {
+    if (step == 0) {
+        *progress = 0;
+        return 0;
+    }
+    *progress = StepFade(*progress, step, MENU_FADE_MAX);
+    return *progress;
+}
+
+static inline int MenuValueWithinWindow(s32 value, s32 target, u32 window) {
+    int64_t distance = (int64_t)value - target;
+
+    if (distance < 0) {
+        distance = -distance;
+    }
+    return (uint64_t)distance <= window;
+}
+
+/* Normalize an arbitrary fixed-point carousel angle around zero. */
+static inline s32 MenuWrapAngle(s32 angle, s32 period) {
+    int64_t half;
+    int64_t wrapped;
+
+    if (period <= 0) {
+        return 0;
+    }
+    half = period / 2;
+    wrapped = ((int64_t)angle + half) % period;
+    if (wrapped < 0) {
+        wrapped += period;
+    }
+    return (s32)(wrapped - half);
+}
+
+enum {
+    MENU_VIEW_OFFSET_MIN = 0,
+    MENU_VIEW_OFFSET_MAX = 250000,
+    MENU_VIEW_OFFSET_RISE_START = 2500,
+    MENU_COURSE_SWAP_DELAY_FRAMES = 20,
+};
+
+static inline s32 NormalizeMenuViewOffset(s32 offset) {
+    return AddClampedMenuValue(offset, 0, MENU_VIEW_OFFSET_MIN,
+                               MENU_VIEW_OFFSET_MAX);
+}
+
+static inline s32 PrepareMenuViewOffset(s32 current, s32 target) {
+    if (target >= MENU_VIEW_OFFSET_MAX &&
+        current < MENU_VIEW_OFFSET_RISE_START) {
+        return MENU_VIEW_OFFSET_RISE_START;
+    }
+    return current;
+}
+
+static inline s32 NormalizeCourseSwapDelay(s32 delay) {
+    return AddClampedMenuValue(delay, 0, 0,
+                               MENU_COURSE_SWAP_DELAY_FRAMES - 1);
+}
+
+static inline s32 AdvanceMenuViewOffsetValue(s32 current, s32 target) {
+    int64_t delta;
+    int64_t step = 0;
+
+    current = NormalizeMenuViewOffset(current);
+    target = NormalizeMenuViewOffset(target);
+    delta = (int64_t)target - current;
+
+    if (delta > 0) {
+        step = (250008 - delta) / 8;
+    } else if (delta < 0) {
+        step = (delta - 12) / 12;
+    }
+    return NormalizeMenuViewOffset((s32)((int64_t)current + step));
+}
+
+static inline s32 AdvanceMenuViewAngleValue(s32 current, s32 target,
+                                            s32 divisor) {
+    int64_t delta;
+    int64_t step;
+
+    if (divisor <= 0 || current == target) {
+        return current;
+    }
+    delta = (int64_t)target - current;
+    step = delta > 0 ? (delta + divisor) / divisor
+                     : (delta - divisor) / divisor;
+    return (s32)((int64_t)current + step);
+}
+
+static inline s32 RebaseCarouselValue(s32 value, s32 previousTarget,
+                                      s32 revolution) {
+    return (s32)((u32)value - (u32)previousTarget + (u32)revolution);
+}
+
+typedef enum MenuDialogAction {
+    MENU_DIALOG_NO_ACTION,
+    MENU_DIALOG_CONFIRM,
+    MENU_DIALOG_CANCEL,
+    MENU_DIALOG_LEFT,
+    MENU_DIALOG_RIGHT,
+} MenuDialogAction;
+
+static inline MenuDialogAction ChooseMenuDialogAction(u16 pressed) {
+    if (pressed & PAD_CONFIRM) return MENU_DIALOG_CONFIRM;
+    if (pressed & PAD_CANCEL) return MENU_DIALOG_CANCEL;
+    if (pressed & PAD_LEFT) return MENU_DIALOG_LEFT;
+    if (pressed & PAD_RIGHT) return MENU_DIALOG_RIGHT;
+    return MENU_DIALOG_NO_ACTION;
+}
+
+typedef struct ShopPrice {
+    s32 amount;
+    s32 available;
+} ShopPrice;
+
+const TimedDrawCommand *CarShopPrompt(CarMaker maker);
+
+static inline ShopPrice LookupShopPrice(const s32 *prices, size_t count,
+                                        s32 assetIndex) {
+    ShopPrice result = {0, 0};
+
+    if (prices != NULL && (u32)assetIndex < count && prices[assetIndex] >= 0) {
+        result.amount = prices[assetIndex];
+        result.available = 1;
+    }
+    return result;
+}
+
+typedef enum CarShopState {
+    CAR_SHOP_IDLE = 0,
+    CAR_SHOP_LEAVE = 1,
+    CAR_SHOP_LEAVE_AFTER_SALE = 2,
+    CAR_SHOP_BUY_PROMPT = -1,
+    CAR_SHOP_NO_FUNDS = -2,
+    CAR_SHOP_SALE_COUNTDOWN = -3,
+} CarShopState;
+
+typedef enum EngineerShopState {
+    ENGINEER_SHOP_IDLE = 0,
+    ENGINEER_SHOP_LEAVE = 1,
+    ENGINEER_SHOP_LEAVE_AFTER_TUNE_UP = 2,
+    ENGINEER_SHOP_TUNE_UP_PROMPT = -1,
+    ENGINEER_SHOP_TUNE_UP_COUNTDOWN = -2,
+    ENGINEER_SHOP_NO_FUNDS = -3,
+} EngineerShopState;
+
+enum {
+    TEAM_NAME_HIDDEN_MODEL_KEY = 10,
+    TEAM_NAME_KEY_COUNT =
+        MENU_TEAM_NAME_GRID_COLUMNS * MENU_TEAM_NAME_GRID_ROWS,
+    TEAM_NAME_KEY_RUBOUT = TEAM_NAME_KEY_COUNT - 2,
+    TEAM_NAME_KEY_END = TEAM_NAME_KEY_COUNT - 1,
+    TEAM_NAME_CURSOR_ENTRY_ANGLE = 4096000,
+    TEAM_NAME_MODEL_SWAP_ANGLE = 3072000,
+    TEAM_NAME_MODEL_HALF_TURN = 2048000,
+    TEAM_NAME_MODEL_EASE_DIVISOR = 16,
+};
+
+typedef struct TeamNameModelAnimation {
+    s32 angle;
+    s32 displayedModel;
+    s32 pendingModel;
+} TeamNameModelAnimation;
+
+static inline TeamNameModelAnimation AdvanceTeamNameModelAnimation(
+    s32 angle, s32 target, s32 displayedModel, s32 pendingModel) {
+    TeamNameModelAnimation result;
+
+    result.angle = AdvanceMenuViewAngleValue(
+        angle, target, TEAM_NAME_MODEL_EASE_DIVISOR);
+    result.displayedModel = displayedModel;
+    result.pendingModel = pendingModel;
+    if (result.angle < TEAM_NAME_MODEL_SWAP_ANGLE && pendingModel >= 0) {
+        result.angle =
+            (s32)((u32)result.angle - TEAM_NAME_MODEL_HALF_TURN);
+        result.displayedModel = pendingModel;
+        result.pendingModel = -1;
+    }
+    return result;
+}
+
+static inline s32 NormalizeTeamNameCursor(s32 cursor) {
+    return AddClampedMenuValue(cursor, 0, 0, TEAM_NAME_KEY_END);
+}
+
+static inline s32 MenuModelIndexOrFallback(s32 preferred, s32 modelCount) {
+    if (modelCount <= 0) {
+        return -1;
+    }
+    if ((u32)preferred < (u32)modelCount) {
+        return preferred;
+    }
+    if (modelCount > 1) {
+        return 1;
+    }
+    return 0;
+}
+
+static inline s32 UpdatedMenuViewSpin(s32 spin, u16 held) {
+    s32 delta = 0;
+
+    if (held & PAD_L1) delta++;
+    if (held & PAD_R1) delta--;
+    return AddClampedMenuValue(spin, delta, -64, 64);
+}
+
+static inline s32 UpdatedShowroomSteering(s32 steering, u16 held) {
+    s32 delta = 0;
+
+    if (held & PAD_R2) delta += 192;
+    if (held & PAD_L2) delta -= 192;
+    return AddClampedMenuValue(steering, delta, -6144, 6144);
+}
+
+static inline s32 TeamNameCharacterModelIndex(s32 key, s32 modelCount) {
+    if (key == TEAM_NAME_HIDDEN_MODEL_KEY ||
+        key == TEAM_NAME_KEY_RUBOUT || key == TEAM_NAME_KEY_END) {
+        return -1;
+    }
+    return MenuModelIndexOrFallback(key, modelCount);
+}
+
+/* The showroom carousel rebases its fixed-point view angle by this span when
+ * changing direction. Input is accepted through the inclusive window ending
+ * one unit below half that span. */
+enum {
+    MENU_CAR_VIEW_REBASE_SPAN = 600000,
+    MENU_CAR_VIEW_SETTLE_WINDOW = MENU_CAR_VIEW_REBASE_SPAN / 2 - 1,
+    MENU_CAR_VIEW_RIGHT_TARGET = MENU_CAR_VIEW_REBASE_SPAN * 2,
+    MENU_COURSE_VIEW_REBASE_SPAN = 500000,
+    MENU_COURSE_VIEW_SWAP_DISTANCE = MENU_COURSE_VIEW_REBASE_SPAN / 2,
+    MENU_COURSE_VIEW_RIGHT_TARGET = MENU_COURSE_VIEW_REBASE_SPAN * 2,
+    MENU_COURSE_VIEW_EASE_DIVISOR = 18,
+};
+
+static inline int ShowroomCarAtSwapPoint(s32 angle, s32 target,
+                                         s32 pendingCar) {
+    if (pendingCar < 0 || angle == target) {
+        return 0;
+    }
+    return target < angle
+               ? angle <= MENU_CAR_VIEW_SETTLE_WINDOW
+               : angle >=
+                     MENU_CAR_VIEW_RIGHT_TARGET - MENU_CAR_VIEW_SETTLE_WINDOW;
+}
+
+static inline int CourseCarouselAtSwapPoint(s32 angle, s32 target,
+                                            s32 pendingCourse) {
+    if (pendingCourse < 0 || angle == target) {
+        return 0;
+    }
+    return target > angle
+               ? angle > MENU_COURSE_VIEW_RIGHT_TARGET -
+                             MENU_COURSE_VIEW_SWAP_DISTANCE
+               : angle < MENU_COURSE_VIEW_SWAP_DISTANCE;
+}
+
+typedef struct CourseCarouselAnimation {
+    s32 angle;
+    s32 swapDelay;
+    s32 displayedCourse;
+    s32 pendingCourse;
+} CourseCarouselAnimation;
+
+static inline CourseCarouselAnimation AdvanceCourseCarouselAnimation(
+    s32 angle, s32 target, s32 swapDelay, s32 displayedCourse,
+    s32 pendingCourse) {
+    CourseCarouselAnimation result = {
+        angle,
+        swapDelay,
+        displayedCourse,
+        pendingCourse,
+    };
+
+    if (CourseCarouselAtSwapPoint(angle, target, pendingCourse)) {
+        result.swapDelay = NormalizeCourseSwapDelay(swapDelay);
+        if (result.swapDelay >= MENU_COURSE_SWAP_DELAY_FRAMES - 1) {
+            result.swapDelay = 0;
+            result.displayedCourse = pendingCourse;
+            result.pendingCourse = -1;
+        } else {
+            result.swapDelay++;
+        }
+    } else if (angle != target) {
+        result.angle = AdvanceMenuViewAngleValue(
+            angle, target, MENU_COURSE_VIEW_EASE_DIVISOR);
+    }
+    return result;
+}
+
+typedef enum ShowroomCarLoadAction {
+    SHOWROOM_CAR_LOAD_WAIT,
+    SHOWROOM_CAR_LOAD_ACTIVATE,
+    SHOWROOM_CAR_LOAD_CANCEL,
+} ShowroomCarLoadAction;
+
+static inline ShowroomCarLoadAction ResolveShowroomCarLoadAction(
+    s32 completedSuccessfully, s32 failed) {
+    if (failed != 0) {
+        return SHOWROOM_CAR_LOAD_CANCEL;
+    }
+    if (completedSuccessfully != 0) {
+        return SHOWROOM_CAR_LOAD_ACTIVATE;
+    }
+    return SHOWROOM_CAR_LOAD_WAIT;
+}
+
+/* The showroom turntable is implementation shared by CAR SELECT and SHOP. */
+int MenuCarViewSettled(void);
+void MenuSpinToCar(s32 *shownCar, s32 fromIndex, s32 toIndex, s32 newTarget);
+void MenuSpinBackToPlayerCar(s32 shownCar);
+
+void RestoreTeamLogoClut(void);
+void UploadTeamLogoClut(void);
+s32 AdvanceCarSpecPanel(s32 *progress, s32 step);
+
+/*
+ * What a prompt makes of a button press: the sound cues it plays, in the
+ * order it plays them, and the state it leaves behind.
+ *
+ * A prompt's screen function draws, reads the pad, plays sounds and moves
+ * state in one body, which means none of it can be exercised without a
+ * renderer and three hundred frames of boot to reach the screen. Deciding is
+ * the part that can be wrong in a way a player notices, and it is a pure
+ * function of the press and the state it acts on, so it is kept separate and
+ * every combination of buttons can be checked directly.
+ */
+typedef struct MenuPromptOutcome {
+    s32 cues[4];
+    s32 cueCount;
+    s32 busy;
+    s32 confirmTimer;
+    s32 subCursor;
+} MenuPromptOutcome;
+
+typedef enum CourseSelectState {
+    COURSE_SELECT_IDLE = 0,
+    COURSE_SELECT_TO_CAR_SELECT = 1,
+    COURSE_SELECT_TO_RACE = 2,
+    COURSE_SELECT_TO_RANKING = 3,
+    COURSE_SELECT_TO_RECORD_ENTRY = 4,
+    COURSE_SELECT_SAVE_PROMPT = -1,
+    COURSE_SELECT_CLASS_PROMPT = -2,
+    COURSE_SELECT_SAVE_COUNTDOWN = -3,
+    COURSE_SELECT_SAVE_DISMISSED = -4,
+    COURSE_SELECT_CLASS_CHANGE = -5,
+} CourseSelectState;
+
+typedef enum CourseSelectOption {
+    COURSE_SELECT_OPTION_CAR_SELECT,
+    COURSE_SELECT_OPTION_CLASS_OR_RANKING,
+    COURSE_SELECT_OPTION_SAVE_OR_START,
+    COURSE_SELECT_OPTION_COUNT,
+} CourseSelectOption;
+
+/* The save prompt offered when a course is chosen: confirm, cancel, and the
+ * two directions that pick between its buttons. */
+MenuPromptOutcome DecideSavePrompt(u16 pressed, s32 busy, s32 confirmTimer,
+                                   s32 subCursor);
+
+/*
+ * The class prompt does two kinds of thing, not one, and every press is acted
+ * on, so confirming while a direction is held starts the curtain between two
+ * sounds rather than before or after both. The order is therefore part of the
+ * answer and the outcome carries a list rather than a count of cues.
+ */
+/* The things a menu decision can ask for, in the order it asks for them. */
+enum {
+    MENU_PROMPT_CUE = 0,      /* play this sound cue */
+    MENU_PROMPT_CURTAIN = 1,  /* start the curtain over the class change */
+    MENU_BROWSE_PREV = 2,     /* step the course card to the previous one */
+    MENU_BROWSE_NEXT = 3,     /* and to the next */
+    MENU_CHOOSE_ROW = 4       /* act on the row the cursor is on */
+};
+
+typedef struct MenuPromptEffect {
+    s32 kind;
+    s32 value;
+} MenuPromptEffect;
+
+typedef struct MenuClassPromptOutcome {
+    MenuPromptEffect effects[5];
+    s32 effectCount;
+    s32 busy;
+    s32 confirmTimer;
+    s32 subCursor;
+    s32 changeApplied;
+} MenuClassPromptOutcome;
+
+/*
+ * The idle screen: moving between its three rows, browsing the courses, and
+ * choosing. Unlike the prompts, confirm here acts on the row the directions
+ * have just moved to rather than the one that was showing, which is a real
+ * difference in feel and is why this is worth stating rather than assuming.
+ */
+typedef struct CourseSelectInputOutcome {
+    s32 cues[2];
+    s32 cueCount;
+    s32 option;
+    /* Whether the player is asking to browse. Whether they may is a question
+     * about live state that the screen answers itself, in the order and only
+     * as often as it always did. */
+    int wantsPrev;
+    int wantsNext;
+    int choosesRow;
+} CourseSelectInputOutcome;
+
+typedef struct SoundOption {
+    s32 cursor;
+    s32 savedValue;
+} SoundOption;
+
+void EnterSoundOptionMenu(void);
+void EnterSoundOptionMenuState(SoundOption *screen);
+void UpdateSoundOptionMenuState(SoundOption *screen);
+void UpdateSoundSettingAdjustState(SoundOption *screen);
+
+CourseSelectInputOutcome DecideCourseSelectInput(u16 pressed, u16 held,
+                                                 s32 option);
+
+/* Choosing the Grand Prix class, which resets the series progress, so picking
+ * the class already in use has to close the prompt and change nothing. */
+MenuClassPromptOutcome DecideClassPrompt(u16 pressed, s32 busy,
+                                         s32 confirmTimer, s32 subCursor,
+                                         s32 currentClass, s32 maxClass,
+                                         s32 changeApplied);
+
+extern Rgb g_PaintColorTable[MENU_PAINT_COLOR_COUNT];
+extern u16 g_TeamLogoClut[16];
+extern TeamLogoCanvas g_TeamLogoCanvas;
+extern const s16 g_MenuLightBurstBandX[MENU_LIGHT_BURST_RAY_COUNT];
+extern const s16 g_MenuLightBurstBandY[MENU_LIGHT_BURST_RAY_COUNT];
+extern RaceRecord g_RankingRecords[2][4][5];
+extern RaceRecord g_TimeRecords[2][4][5];
+extern ClassRecordSprite g_ClassRecordCellSprites[];
+extern ScoreRecord g_ClassRecords[CLASS_RECORD_COUNT];
+typedef struct CarShop {
+    const TimedDrawCommand *modal;
+    s32 option;
+    s32 confirmTimer;
+    s32 modalCursor;
+} CarShop;
+
+void UpdateCarShop(CarShop *shop, CarBrowse *browse);
+void ResetCarShopScreen(void);
+
+u8 *DrawTitleMenuLabel(GameOrderingTableEntry *ot, u8 *packet,
+                       TitleMenuItem item, s32 x, s32 y,
+                       s32 visibleHeight, s32 selected);
+
+#endif

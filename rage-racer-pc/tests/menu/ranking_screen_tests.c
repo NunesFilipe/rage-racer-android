@@ -1,0 +1,182 @@
+#include "common.h"
+#include "game/menu.h"
+#include "game/race.h"
+
+#include <limits.h>
+#include <stdio.h>
+
+static MenuWidgets s_menuWidgets;
+static Ranking s_ranking;
+
+extern s32 g_MenuHandlerIndex;
+extern s32 g_MenuOutgoingHandlerIndex;
+extern s32 g_MenuScreen;
+
+void MenuActivateScreen(s32 screen) {
+    g_MenuScreen = screen;
+    g_MenuHandlerIndex = screen;
+}
+void MenuBeginExit(s32 screen) {
+    g_MenuHandlerIndex = -1;
+    g_MenuOutgoingHandlerIndex = screen;
+}
+
+s32 GameMenuBusy;
+s32 g_CourseIndex;
+s32 g_MenuHandlerIndex;
+s32 g_MenuOutgoingHandlerIndex;
+s32 g_MenuOverlayPattern;
+s32 g_MenuScreen;
+s32 g_UiScriptProgress;
+s32 g_UiScriptProgress2;
+u16 g_PadPressed;
+TimedDrawCommand g_RankingMenuScript[9];
+TimedDrawCommand g_RankingPanelScript[5];
+TimedDrawCommand g_UiChromeScript[1];
+
+static s32 s_scriptResult;
+static s32 s_tableResult;
+static s32 s_lastCue;
+static s32 s_timeAttackPlateStep;
+
+s32 RunTimedDrawScript(const TimedDrawCommand *commands, s32 *progress,
+                       s32 step) {
+    (void)commands;
+    (void)progress;
+    (void)step;
+    return s_scriptResult;
+}
+
+s32 DrawRankingTable(s32 *progress, s32 step, RankingTableKind table) {
+    (void)progress;
+    (void)step;
+    (void)table;
+    return s_tableResult;
+}
+
+void DrawFadingMenuSprites(s32 progress, s32 count, s32 selected) {
+    (void)progress;
+    (void)count;
+    (void)selected;
+}
+static CourseSelectScreen s_courseSelect;
+CourseSelectScreen *MenuCourseSelect(void) { return &s_courseSelect; }
+void DrawMenuCourseView(CourseSelectScreen *screen) { (void)screen; }
+void DrawMenuLightBurst(MenuWidgets *widgets, s32 step) {
+    (void)widgets;
+    (void)step;
+}
+void DrawTimeAttackPlate(MenuWidgets *widgets) { s_timeAttackPlateStep = widgets->timeAttackStep; }
+void PlaySoundCue(s32 cue) { s_lastCue = cue; }
+
+#define CHECK(condition)                                                       \
+    do {                                                                       \
+        if (!(condition)) {                                                    \
+            fprintf(stderr, "check failed at line %d: %s\n", __LINE__,         \
+                    #condition);                                               \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+static void Reset(void) {
+    GameMenuBusy = 0;
+    g_MenuOverlayPattern = 0;
+    g_PadPressed = 0;
+    s_ranking.cursor = 0;
+    g_UiScriptProgress = 0;
+    g_UiScriptProgress2 = 0;
+    s_scriptResult = 0;
+    s_tableResult = 0;
+    s_lastCue = 0;
+    s_timeAttackPlateStep = -99;
+    g_MenuScreen = 0;
+    g_MenuHandlerIndex = 0;
+    g_MenuOutgoingHandlerIndex = 0;
+}
+
+int main(void) {
+    Reset();
+    g_UiScriptProgress2 = 9;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -1 && g_UiScriptProgress2 == 0);
+
+    s_scriptResult = 1;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -2);
+    CHECK(s_lastCue == 2);
+
+    g_UiScriptProgress2 = 0;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -3);
+
+    s_tableResult = 1;
+    g_PadPressed = PAD_CANCEL;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -4 && s_lastCue == 3);
+    g_UiScriptProgress2 = 0;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -1);
+
+    s_ranking.cursor = 1;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -2);
+    g_UiScriptProgress2 = 0;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -5);
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -6);
+    g_UiScriptProgress2 = 0;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -1);
+
+    s_ranking.cursor = 2;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == 1 && g_MenuOverlayPattern == 2 && s_lastCue == 3);
+
+    g_CourseIndex = 4;
+    g_UiScriptProgress = 0;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == 0 && g_MenuScreen == 1);
+    CHECK(g_MenuHandlerIndex == 1 && g_MenuOutgoingHandlerIndex == 2);
+    CHECK(s_ranking.cursor == 0 && s_menuWidgets.timeAttackStep == 1);
+    CHECK(s_timeAttackPlateStep == 0);
+
+    GameMenuBusy = 1;
+    g_CourseIndex = 3;
+    UpdateRankingScreen();
+    CHECK(s_menuWidgets.timeAttackStep == -1);
+
+    Reset();
+    GameMenuBusy = -1;
+    s_scriptResult = 1;
+    g_PadPressed = PAD_CANCEL;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == 1 && g_MenuOverlayPattern == 2);
+
+    Reset();
+    GameMenuBusy = -2;
+    s_ranking.cursor = INT_MAX;
+    g_UiScriptProgress2 = 0;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -1);
+
+    Reset();
+    GameMenuBusy = INT_MIN;
+    s_ranking.cursor = INT_MAX;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -1 && s_ranking.cursor == 2);
+
+    Reset();
+    GameMenuBusy = INT_MAX;
+    UpdateRankingScreen();
+    CHECK(GameMenuBusy == -1 && g_MenuScreen == 0);
+
+    puts("ranking screen tests passed");
+    return 0;
+}
+
+MenuWidgets *MenuWidgetState(void) { return &s_menuWidgets; }
+Ranking *MenuRanking(void) { return &s_ranking; }

@@ -1,0 +1,1334 @@
+// Shared SDL3 platform code. Only use via #include.
+#ifndef SDL3_COMMON_H
+#define SDL3_COMMON_H
+
+#include <SDL3/SDL.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <libetc.h>
+#include <psyz.h>
+#include <psyz/overlay.h>
+#include <psyz/overlay_sdl3.h>
+#include "../internal.h"
+
+// HACK to avoid conflicting with RECT from windef.h
+// It renames the libgpu RECT into PS1_RECT, ensuring the windef struct RECT
+// does not conflict. The hack is applied to all platform for consistency.
+#define RECT PS1_RECT
+#include "libgpu.h"
+#include "../draw.h"
+#undef RECT
+
+#define VSYNC_NTSC 59.94
+#define VSYNC_PAL 50.0
+
+// hooks the including renderer backend must implement
+static void PlatformBackend_SetDriverVsync(bool enable);
+static void PlatformBackend_Present(void);
+static void QuitPlatform(void);
+
+// When set, the next Present must not block waiting for a swapchain image:
+// intermediate presents from a host renderer run inside the game's
+// frame-sync wait, and stalling there quantizes the logic tick to the
+// display refresh (observed as slow motion). Backends that cannot acquire
+// without blocking simply skip the frame.
+static bool present_nonblocking_request = false;
+
+#ifndef PSYZ_TITLE
+#define PSYZ_TITLE "PSY-Z"
+#endif
+static char window_title[0x100] = {PSYZ_TITLE};
+STATIC_ASSERT(sizeof(PSYZ_TITLE) <= sizeof(window_title),
+              "PSYZ_TITLE exceeds max allowed characters");
+
+// shared window/platform state
+static SDL_Window* sdl3_window = NULL;
+static bool is_window_visible = false;
+/* Render into the normal GPU targets without displaying a test window. */
+static bool headless_window;
+static void ConfigureTestWindow(void) {
+    headless_window = SDL_GetHintBoolean("PSYZ_HEADLESS", false);
+    if (headless_window) {
+        SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
+        SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+        SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "0");
+    }
+}
+static bool is_platform_initialized = false;
+static bool is_platform_init_successful = false;
+static bool quit_requested = false;
+static bool debug_show_vram = false;
+static bool is_fullscreen = false;
+
+// defaults to better support integer scaling
+#ifndef DEFAULT_FRONT_W
+#define DEFAULT_FRONT_W 1280
+#endif
+#ifndef DEFAULT_FRONT_H
+#define DEFAULT_FRONT_H 960
+#endif
+
+typedef struct {
+    int w, h;
+} WndSize;
+
+static inline u8 color_5to8(unsigned int c5) {
+    return (u8)((c5 * 255 + 15) / 31);
+}
+static inline unsigned int color_8to5(unsigned int c8) {
+    return (c8 * 31 + 127) / 255;
+}
+static void ConvertRgb5551ToRgba8888(const u16* src, u8* dst, size_t pixels) {
+    for (size_t i = 0; i < pixels; i++) {
+        u16 v = src[i];
+        dst[0] = color_5to8(v & 0x1F);
+        dst[1] = color_5to8((v >> 5) & 0x1F);
+        dst[2] = color_5to8((v >> 10) & 0x1F);
+        dst[3] = (v & 0x8000) ? 0xFF : 0x00;
+        dst += 4;
+    }
+}
+static void ConvertRgba8888ToRgb5551(const u8* src, u16* dst, size_t pixels) {
+    for (size_t i = 0; i < pixels; i++) {
+        u16 v = (u16)color_8to5(src[0]);
+        v |= (u16)(color_8to5(src[1]) << 5);
+        v |= (u16)(color_8to5(src[2]) << 10);
+        v |= (src[3] >= 0x80) ? 0x8000 : 0;
+        dst[i] = v;
+        src += 4;
+    }
+}
+
+static inline bool RectsOverlap(
+    int src_x, int src_y, int dst_x, int dst_y, int w, int h) {
+    return src_x < dst_x + w && dst_x < src_x + w && src_y < dst_y + h &&
+           dst_y < src_y + h;
+}
+
+static void* vram_convert_buf = NULL;
+static size_t vram_convert_cap = 0;
+static void* GetVramConvertBuffer(size_t size) {
+    if (vram_convert_cap < size) {
+        void* p = realloc(vram_convert_buf, size);
+        if (!p) {
+            ERRORF("failed to allocate %zu bytes", size);
+            return NULL;
+        }
+        vram_convert_buf = p;
+        vram_convert_cap = size;
+    }
+    return vram_convert_buf;
+}
+
+static bool disp_on = false;
+static int set_disp_horiz = 256;
+static int set_disp_vert = 240;
+static int cur_disp_horiz = -1;
+static int cur_disp_vert = -1;
+static bool is_pal = false;
+static PsyzAspectMode aspect_mode = PSYZ_ASPECT_DISPLAY;
+static WndSize wnd_size_in_pixels = {0, 0};
+
+static void SetWindowLogicalSize(int width, int height) {
+    if (!sdl3_window) {
+        return;
+    }
+    SDL_SetWindowSize(sdl3_window, width, height);
+    SDL_GetWindowSizeInPixels(
+        sdl3_window, &wnd_size_in_pixels.w, &wnd_size_in_pixels.h);
+    if (getenv("RAGE_PORT_WINDOW_DEBUG") != NULL) {
+        INFOF("window logical=%dx%d pixels=%dx%d density=%.2f",
+              width, height, wnd_size_in_pixels.w, wnd_size_in_pixels.h,
+              SDL_GetWindowPixelDensity(sdl3_window));
+    }
+}
+
+static float GetCurrentGameAspectRatio(int disp_w, int disp_h) {
+    if (aspect_mode == PSYZ_ASPECT_DISPLAY) {
+        float vref = is_pal ? 288.0f : 240.0f;
+        return (4.0f / 3.0f) * ((float)set_disp_horiz / 256.0f) /
+               ((float)set_disp_vert / vref);
+    }
+    if (disp_h <= 0) {
+        return 4.0f / 3.0f;
+    }
+    /* A 480-line PS1 framebuffer is interlaced: two fields make one
+     * 240-line picture.  Treating those stored field lines as square output
+     * pixels turns the intended 4:3 320x480 mode into a 2:3 image. */
+    if (disp_h > 288) {
+        disp_h /= 2;
+    }
+    return (float)disp_w / (float)disp_h;
+}
+
+// Fit a game of the given aspect ratio into the window, centering it and
+// leaving black bars on the axis that does not fill.
+static SDL_Rect FitGameToWindow(float game_aspect, WndSize win) {
+    SDL_Rect r;
+    if (game_aspect <= 0.0 || win.w <= 0 || win.h <= 0) {
+        r.x = 0;
+        r.y = 0;
+        r.w = win.w;
+        r.h = win.h;
+        return r;
+    }
+    float window_aspect = (float)win.w / (float)win.h;
+    if (window_aspect > game_aspect) {
+        r.h = win.h;
+        r.w = (int)(win.h * game_aspect + 0.5f);
+    } else {
+        r.w = win.w;
+        r.h = (int)(win.w / game_aspect + 0.5f);
+    }
+    r.x = (win.w - r.w) / 2;
+    r.y = (win.h - r.h) / 2;
+    return r;
+}
+
+int Psyz_VideoSetAspectMode(PsyzAspectMode mode) {
+    if (mode != PSYZ_ASPECT_DISPLAY && mode != PSYZ_ASPECT_SQUARE) {
+        return -1;
+    }
+    aspect_mode = mode;
+    return 0;
+}
+
+static Uint32 elapsed_from_beginning = 0;
+static Uint64 last_vsync_counter = 0;
+static unsigned limitless_vsync_units = 0;
+
+// frame pacing state
+static double target_frame_rate = VSYNC_NTSC;
+static double target_frame_time_us = 1000000.0 / VSYNC_NTSC;
+/* An application that selects a rate explicitly owns timing independently of
+ * the emulated display mode (whose PAL bit is often changed by the game). */
+static bool target_frame_rate_explicit = false;
+static Uint64 perf_frequency = 0;
+static Uint64 last_frame_time = 0;
+static Uint64 finish_time = 0;
+static double drift_compensation = 0.0;
+static PsyzVsyncMode vsync_mode = PSYZ_VSYNC_AUTO;
+static PsyzDitherMode dither_mode = PSYZ_DITHER_AUTO;
+static bool use_driver_vsync = false;
+static PsyzVideoStats gpu_stats = {0};
+
+static void PollEvents(void);
+
+// overlay callbacks shared across backends
+static PsyzOverlayEventCB_SDL3 overlay_event_cb;
+PsyzOverlayEventCB_SDL3 Psyz_OverlayEvent_SDL3(PsyzOverlayEventCB_SDL3 cb) {
+    const PsyzOverlayEventCB_SDL3 prev = overlay_event_cb;
+    overlay_event_cb = cb;
+    return prev;
+}
+
+static PsyzOverlayFrameCB overlay_frame_cb;
+PsyzOverlayFrameCB Psyz_OverlayFrameCB(PsyzOverlayFrameCB cb) {
+    const PsyzOverlayFrameCB prev = overlay_frame_cb;
+    overlay_frame_cb = cb;
+    return prev;
+}
+
+static PsyzOverlayDestroyCB overlay_destroy_cb;
+PsyzOverlayDestroyCB Psyz_OverlayDestroyCB(PsyzOverlayDestroyCB cb) {
+    const PsyzOverlayDestroyCB prev = overlay_destroy_cb;
+    overlay_destroy_cb = cb;
+    return prev;
+}
+
+void Psyz_SetTitle(const char* str) {
+    strncpy(window_title, str, sizeof(window_title) - 1);
+    window_title[sizeof(window_title) - 1] = 0;
+    if (sdl3_window) {
+        SDL_SetWindowTitle(sdl3_window, window_title);
+    }
+}
+
+PsyzSize Psyz_VideoGetDisplaySize(void) {
+    PsyzSize s = {0, 0};
+    SDL_GetWindowSize(sdl3_window, &s.w, &s.h);
+    return s;
+}
+
+void Psyz_VideoSetDrawArea(PsyzRect rect) {
+    // not usable on SDL3, consoles only
+    (void)rect;
+}
+
+static double GetElapsedMicroseconds(Uint64 start, Uint64 end) {
+    return ((double)(end - start) * 1000000.0) / (double)perf_frequency;
+}
+
+static void ConfigureVSync(double target_fps) {
+    if (vsync_mode == PSYZ_VSYNC_ON) {
+        PlatformBackend_SetDriverVsync(true);
+        use_driver_vsync = true;
+        INFOF("vsync forced ON (driver VSync)");
+        return;
+    }
+    if (vsync_mode == PSYZ_VSYNC_OFF) {
+        PlatformBackend_SetDriverVsync(false);
+        use_driver_vsync = false;
+        INFOF("vsync forced OFF (frame limiter)");
+        return;
+    }
+    if (vsync_mode == PSYZ_VSYNC_LIMITLESS) {
+        PlatformBackend_SetDriverVsync(false);
+        use_driver_vsync = false;
+        INFOF("vsync forced OFF, internal frame limiter disabled");
+        return;
+    }
+
+    SDL_DisplayID display_id = sdl3_window
+        ? SDL_GetDisplayForWindow(sdl3_window)
+        : SDL_GetPrimaryDisplay();
+    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display_id);
+    double detected_framerate = 60.0;
+    if (mode && mode->refresh_rate > 0.0f) {
+        detected_framerate = mode->refresh_rate;
+    }
+
+    const double target_time = 1.0 / target_fps;
+    const double tolerance_us = target_time * 0.05;
+    bool can_use_driver_vsync =
+        fabs((1.0 / detected_framerate) - target_time) < tolerance_us;
+
+    if (can_use_driver_vsync) {
+        PlatformBackend_SetDriverVsync(true);
+        use_driver_vsync = true;
+        INFOF("detected %.2f Hz monitor, use driver VSync", detected_framerate);
+    } else {
+        PlatformBackend_SetDriverVsync(false);
+        use_driver_vsync = false;
+        INFOF("detected %.2f Hz monitor but targeting %.2f, use frame limiter",
+              detected_framerate, target_fps);
+    }
+}
+
+static void UpdateTargetFramerate(double fps) {
+    target_frame_rate = fps;
+    target_frame_time_us = 1000000.0 / fps;
+    drift_compensation = 0.0;
+    last_frame_time = SDL_GetPerformanceCounter();
+    ConfigureVSync(target_frame_rate);
+}
+
+int Psyz_VideoSetTargetFramerate(double fps) {
+    if (fps < 1.0 || fps > 1000.0) return -1;
+    target_frame_rate_explicit = true;
+    UpdateTargetFramerate(fps);
+    return 0;
+}
+
+// Initialize the timing/vsync state. Call once at the end of InitPlatform.
+static void Sdl3Common_TimingInit(void) {
+    elapsed_from_beginning = (Uint32)SDL_GetTicks();
+    perf_frequency = SDL_GetPerformanceFrequency();
+    last_frame_time = SDL_GetPerformanceCounter();
+    last_vsync_counter = last_frame_time;
+    /* Applications commonly select PAL/NTSC timing before the first video
+     * call creates the window. Preserve that explicit choice while still
+     * initializing the platform's counters and driver VSync state. */
+    UpdateTargetFramerate(target_frame_rate_explicit ? target_frame_rate
+                                                     : VSYNC_NTSC);
+}
+
+static void WaitForNextFrame(void) {
+    Uint64 current_time = SDL_GetPerformanceCounter();
+    double elapsed_us = GetElapsedMicroseconds(last_frame_time, current_time);
+
+    if (!use_driver_vsync && vsync_mode != PSYZ_VSYNC_LIMITLESS) {
+        double time_to_wait_us =
+            target_frame_time_us - elapsed_us + drift_compensation;
+
+        // only wait if we're ahead of schedule (not running slow)
+        if (time_to_wait_us > 100.0) { // more than 0.1ms to wait
+            // High-precision mode: sleep + busy-wait
+            if (time_to_wait_us > 1000.0) {
+                Uint64 sleep_us = (Uint64)(time_to_wait_us - 1000.0);
+                SDL_DelayNS(sleep_us * 1000);
+            }
+
+            // busy-wait for precision
+            double target_elapsed = target_frame_time_us + drift_compensation;
+            while (GetElapsedMicroseconds(
+                       last_frame_time, SDL_GetPerformanceCounter()) <
+                   target_elapsed) {
+            }
+        }
+
+        // measure actual frame time and compensate drift
+        Uint64 frame_end_time = SDL_GetPerformanceCounter();
+        double actual_frame_time =
+            GetElapsedMicroseconds(last_frame_time, frame_end_time);
+        double frame_error = actual_frame_time - target_frame_time_us;
+
+        // apply gentle correction (10% per frame)
+        drift_compensation -= frame_error * 0.1;
+        if (drift_compensation > 5000.0) {
+            drift_compensation = 5000.0;
+        }
+        if (drift_compensation < -5000.0) {
+            drift_compensation = -5000.0;
+        }
+    }
+
+    Uint64 frame_end_time = SDL_GetPerformanceCounter();
+    gpu_stats.last_frame_time_us =
+        GetElapsedMicroseconds(last_frame_time, frame_end_time);
+    gpu_stats.last_draw_time_us =
+        GetElapsedMicroseconds(last_frame_time, finish_time);
+    gpu_stats.target_frame_time_us = target_frame_time_us;
+    gpu_stats.total_frames++;
+    gpu_stats.using_driver_vsync = use_driver_vsync;
+
+    last_frame_time = frame_end_time;
+}
+
+int Psyz_VideoVSync(int mode) {
+    unsigned short ret;
+    if (mode < 0) {
+        ret = (unsigned short)gpu_stats.total_frames;
+    } else if (mode > 0) {
+        if (vsync_mode == PSYZ_VSYNC_LIMITLESS) {
+            /* The PS1 root counter observed by VSync(1) changes only on a
+             * VBlank boundary.  Advance one complete 1/256-VBlank unit per
+             * deterministic poll; returning half-VBlank values lets a 0x180
+             * race threshold finish after 1.5 fields instead of the retail
+             * two. */
+            if (limitless_vsync_units < 0x200) {
+                limitless_vsync_units += 0x100;
+            }
+            ret = (unsigned short)limitless_vsync_units;
+        } else {
+            Uint64 now = SDL_GetPerformanceCounter();
+            double elapsed_us =
+                GetElapsedMicroseconds(last_vsync_counter, now);
+            unsigned whole_vblanks =
+                (unsigned)(elapsed_us / target_frame_time_us);
+            ret = (unsigned short)(whole_vblanks * 0x100u);
+        }
+    } else {
+        ret = 0;
+    }
+    if (mode == 0) {
+        PlatformBackend_Present();
+        PollEvents();
+        WaitForNextFrame();
+        last_vsync_counter = SDL_GetPerformanceCounter();
+        limitless_vsync_units = 0;
+    }
+    return ret;
+}
+
+int Psyz_VideoPresentIntermediate(void) {
+    present_nonblocking_request = true;
+    PlatformBackend_Present();
+    present_nonblocking_request = false;
+    PollEvents();
+    return 0;
+}
+
+int Psyz_VideoSetVsyncMode(PsyzVsyncMode mode) {
+    if (mode < 0 || mode > 3) {
+        return -1;
+    }
+    vsync_mode = mode;
+    if (sdl3_window && is_platform_init_successful) {
+        ConfigureVSync(target_frame_rate);
+    }
+    return 0;
+}
+
+static int s_dither = 0;
+static inline int GetCurrentDither(void) {
+    if (dither_mode == PSYZ_DITHER_OFF) {
+        return 0;
+    }
+    return s_dither;
+}
+
+static inline void SetDither(int dither) { s_dither = dither; }
+
+static inline int CanPolyDither(int isGouraud, int isTextured, int isShadeTex) {
+    return GetCurrentDither() && (isGouraud || (isTextured && isShadeTex));
+}
+
+static int CanLineDither(void) { return GetCurrentDither(); }
+
+int Psyz_VideoSetDitheringMode(PsyzDitherMode mode) {
+    if (mode != PSYZ_DITHER_AUTO && mode != PSYZ_DITHER_OFF) {
+        return -1;
+    }
+    if (dither_mode == mode) {
+        return 0;
+    }
+    if (GetCurrentDither() != (mode == PSYZ_DITHER_OFF ? 0 : s_dither)) {
+        Draw_FlushBuffer();
+    }
+    dither_mode = mode;
+    return 0;
+}
+
+int Psyz_VideoStats(PsyzVideoStats* stats) {
+    if (!stats || !is_platform_init_successful) {
+        return -1;
+    }
+    *stats = gpu_stats;
+    return 0;
+}
+
+struct Gamepad {
+    SDL_JoystickID id;
+    SDL_Gamepad* dev;
+    const char* name;
+};
+static bool is_pads_init = false;
+static struct Gamepad gamepads[16] = {0};
+static void AddGamepad(SDL_JoystickID id) {
+    int i;
+    for (i = 0; i < LEN(gamepads); i++) {
+        if (!gamepads[i].id) {
+            break;
+        }
+    }
+    if (i == LEN(gamepads)) {
+        ERRORF("too many gamepads connected");
+    } else {
+        SDL_Gamepad* dev = SDL_OpenGamepad(id);
+        if (!dev) {
+            ERRORF("failed to open gamepad %d", (int)id);
+            return;
+        }
+        gamepads[i].id = id;
+        gamepads[i].dev = dev;
+        gamepads[i].name = SDL_GetGamepadName(dev);
+        INFOF("connected %s", gamepads[i].name);
+    }
+}
+
+static void RemoveGamepad(SDL_JoystickID id) {
+    int i;
+    for (i = 0; i < LEN(gamepads); i++) {
+        if (gamepads[i].id == id) {
+            break;
+        }
+    }
+    if (i == LEN(gamepads)) {
+        WARNF("gamepad already removed");
+    } else {
+        SDL_CloseGamepad(gamepads[i].dev);
+        gamepads[i] = (struct Gamepad){0};
+    }
+}
+
+void MyPadInit(int mode) {
+    if (!SDL_WasInit(SDL_INIT_GAMEPAD)) {
+        if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
+            ERRORF("failed to initialize SDL_INIT_GAMEPAD");
+        }
+    }
+    is_pads_init = true;
+}
+
+static u_long keyb_p1[] = {
+    SDL_SCANCODE_W,         // PAD_L2
+    SDL_SCANCODE_E,         // PAD_R2
+    SDL_SCANCODE_Q,         // PAD_L1
+    SDL_SCANCODE_R,         // PAD_R1
+    SDL_SCANCODE_S,         // PAD_TRIANGLE
+    SDL_SCANCODE_D,         // PAD_CIRCLE
+    SDL_SCANCODE_X,         // PAD_CROSS
+    SDL_SCANCODE_Z,         // PAD_SQUARE
+    SDL_SCANCODE_BACKSPACE, // PAD_SELECT
+    SDL_SCANCODE_1,         // PAD_L3
+    SDL_SCANCODE_2,         // PAD_R3
+    SDL_SCANCODE_RETURN,    // PAD_START
+    SDL_SCANCODE_UP,        // PAD_UP
+    SDL_SCANCODE_RIGHT,     // PAD_RIGHT
+    SDL_SCANCODE_DOWN,      // PAD_DOWN
+    SDL_SCANCODE_LEFT,      // PAD_LEFT
+};
+/* SDL may deliver KEY_DOWN and KEY_UP in one event pump when a game frame is
+ * slow (notably during FMV decoding). Preserve every down transition for one
+ * pad sample so a short key tap cannot disappear between PS1 VSync polls. */
+static unsigned int keyboard_held_mask;
+static unsigned int keyboard_pressed_latch;
+static bool host_input_enabled = true;
+
+void Psyz_SetHostInputEnabled(int enabled) {
+    host_input_enabled = enabled != 0;
+    if (!host_input_enabled) {
+        keyboard_held_mask = 0;
+        keyboard_pressed_latch = 0;
+    }
+}
+
+static unsigned int KeyboardMaskForScancode(SDL_Scancode scancode) {
+    unsigned int mask = 0;
+    for (int i = 0; i < LEN(keyb_p1); i++) {
+        if ((SDL_Scancode)keyb_p1[i] == scancode) {
+            mask |= 1U << i;
+        }
+    }
+    return mask;
+}
+
+int Psyz_SetKeyboardKey(int button_index, const char* key_name) {
+    SDL_Scancode scancode;
+    if (button_index < 0 || button_index >= LEN(keyb_p1) || !key_name) {
+        return 0;
+    }
+    scancode = SDL_GetScancodeFromName(key_name);
+    if (scancode == SDL_SCANCODE_UNKNOWN) {
+        return 0;
+    }
+    keyb_p1[button_index] = (u_long)scancode;
+    if (getenv("RAGE_PORT_INPUT_DEBUG") != NULL) {
+        INFOF("keyboard binding index=%d name=%s scancode=%d", button_index,
+              key_name, (int)scancode);
+    }
+    return 1;
+}
+static unsigned int PadRead_Keyboard(u_long* config, int config_len) {
+    const bool* keyb = SDL_GetKeyboardState(NULL);
+    unsigned int r = keyboard_held_mask | keyboard_pressed_latch;
+    for (int i = 0; i < config_len; i++) {
+        if (keyb[config[i]]) {
+            r |= 1UL << i;
+        }
+    }
+    if (r != 0 && getenv("RAGE_PORT_INPUT_DEBUG") != NULL) {
+        INFOF("keyboard pad mask=%04X", r);
+    }
+    keyboard_pressed_latch = 0;
+    return r;
+}
+static unsigned int PadRead_Gamepad(struct Gamepad* g) {
+    if (!g || !g->dev) {
+        return 0;
+    }
+    unsigned int r = 0;
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_NORTH)) {
+        r |= PADRup;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_SOUTH)) {
+        r |= PADRdown;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_WEST)) {
+        r |= PADRleft;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_EAST)) {
+        r |= PADRright;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_DPAD_UP)) {
+        r |= PADLup;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) {
+        r |= PADLdown;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
+        r |= PADLleft;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) {
+        r |= PADLright;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) {
+        r |= PADn;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
+        r |= PADl;
+    }
+    if (SDL_GetGamepadAxis(g->dev, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000) {
+        r |= PADo;
+    }
+    if (SDL_GetGamepadAxis(g->dev, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000) {
+        r |= PADm;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_LEFT_STICK)) {
+        r |= PADi;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) {
+        r |= PADj;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_START)) {
+        r |= PADh;
+    }
+    if (SDL_GetGamepadButton(g->dev, SDL_GAMEPAD_BUTTON_BACK)) {
+        r |= PADk;
+    }
+    return r;
+}
+
+static unsigned int SinglePadRead(int id) {
+    if (!is_pads_init) {
+        WARNF("PadInit not called");
+        return 0;
+    }
+    if (id < 0 || id >= LEN(gamepads)) {
+        WARNF("invalid pad id %d", id);
+        return 0;
+    }
+
+    u_long pressed = 0;
+    if (!host_input_enabled) {
+        return 0;
+    }
+    if (id == 0) {
+        pressed |= PadRead_Keyboard(keyb_p1, LEN(keyb_p1));
+#ifdef __ANDROID__
+        extern volatile uint32_t g_AndroidTouchPadMask;
+        pressed |= g_AndroidTouchPadMask;
+#endif
+    }
+    return pressed | PadRead_Gamepad(&gamepads[id]);
+}
+
+static unsigned char AxisToByte(short v) {
+    int u = ((int)v + 32768) >> 8;
+    if (u < 0) {
+        u = 0;
+    }
+    if (u > 0xFF) {
+        u = 0xFF;
+    }
+    return (unsigned char)u;
+}
+
+static bool PortHasHostInput(int port) {
+    if (port < 0 || port >= LEN(gamepads)) {
+        return false;
+    }
+    if (gamepads[port].dev) {
+        return true;
+    }
+    if (port == 0) {
+        // The keyboard always acts as a fallback for port 0.
+        return true;
+    }
+    return false;
+}
+
+static void BuildPadFrame(int port, PsyzControllerKind kind, char* buf) {
+    memset(buf, 0, PSYZ_PAD_BUF_LEN);
+    // No physical input for this port -> report as disconnected regardless of
+    // the requested kind. Games look at buf[0]=0xFF / buf[1]=0xFF to know.
+    if (kind != PSYZ_CTRL_DISCONNECTED && !PortHasHostInput(port)) {
+        kind = PSYZ_CTRL_DISCONNECTED;
+    }
+    buf[0] = 0x00;
+    buf[1] = (char)kind;
+
+    switch (kind) {
+    case PSYZ_CTRL_DIGITAL_PAD:
+    case PSYZ_CTRL_ANALOG_PAD:
+    case PSYZ_CTRL_ANALOG_STICK: {
+        unsigned int pressed = SinglePadRead(port);
+        if (kind == PSYZ_CTRL_ANALOG_STICK) {
+            // The analog stick (SCPH-1110) has no L3/R3; on real hardware
+            // those bits always read as released.
+            pressed &= ~(PADi | PADj);
+        }
+        buf[2] = (char)(~(pressed >> 8) & 0xFF);
+        buf[3] = (char)(~pressed & 0xFF);
+
+        if (kind == PSYZ_CTRL_DIGITAL_PAD) {
+            break;
+        }
+        unsigned char rx = 0x80, ry = 0x80, lx = 0x80, ly = 0x80;
+        if (gamepads[port].dev) {
+            SDL_Gamepad* d = gamepads[port].dev;
+            rx = AxisToByte(SDL_GetGamepadAxis(d, SDL_GAMEPAD_AXIS_RIGHTX));
+            ry = AxisToByte(SDL_GetGamepadAxis(d, SDL_GAMEPAD_AXIS_RIGHTY));
+            lx = AxisToByte(SDL_GetGamepadAxis(d, SDL_GAMEPAD_AXIS_LEFTX));
+            ly = AxisToByte(SDL_GetGamepadAxis(d, SDL_GAMEPAD_AXIS_LEFTY));
+        }
+        buf[4] = (char)rx;
+        buf[5] = (char)ry;
+        buf[6] = (char)lx;
+        buf[7] = (char)ly;
+        break;
+    }
+    case PSYZ_CTRL_MOUSE:
+        // TODO: read SDL mouse state into buf[3] buttons and buf[4..5] motion
+        buf[2] = (char)0xFF;
+        buf[3] = (char)0xFC;
+        buf[4] = 0x00;
+        buf[5] = 0x00;
+        break;
+    case PSYZ_CTRL_KEYBOARD:
+        LOG_ONCE("keyboard controller kind not implemented");
+        break;
+    case PSYZ_CTRL_DISCONNECTED:
+        memset(buf, 0xFF, PSYZ_PAD_BUF_LEN);
+        break;
+    default:
+        WARNF("unknown controller kind 0x%02X", (unsigned)kind);
+        break;
+    }
+}
+
+void Psyz_PadsPoll(void) {
+    char frame[PSYZ_PAD_BUF_LEN];
+
+    PollEvents();
+    for (int port = 0; port < 2; port++) {
+        BuildPadFrame(
+            port, Psyz_PadsSetKind(port, 0, PSYZ_CTRL_QUERY_KIND), frame);
+        Psyz_PadsSet(port, frame, sizeof(frame));
+    }
+}
+
+// Prefers exclusive fullscreen mode, fallback on borderless fullscreen
+static void SetFullScreen(bool isFullscreen) {
+    if (!sdl3_window || headless_window) {
+        return;
+    }
+    if (is_fullscreen == isFullscreen) {
+        return;
+    }
+    is_fullscreen = isFullscreen;
+    if (is_fullscreen) {
+        SDL_DisplayID display_id = SDL_GetDisplayForWindow(sdl3_window);
+        if (!display_id) {
+            display_id = SDL_GetPrimaryDisplay();
+        }
+        SDL_DisplayMode* mode = NULL;
+        SDL_DisplayMode closest;
+        const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(display_id);
+        if (desktop) {
+            if (SDL_GetClosestFullscreenDisplayMode(
+                    display_id, desktop->w, desktop->h, desktop->refresh_rate,
+                    false, &closest)) {
+                mode = &closest;
+            }
+        }
+        SDL_SetWindowFullscreenMode(sdl3_window, mode);
+        if (!SDL_SetWindowFullscreen(sdl3_window, true)) {
+            WARNF("failed to enter fullscreen: %s", SDL_GetError());
+            is_fullscreen = false;
+            return;
+        }
+        INFOF(
+            "entered %s fullscreen", mode ? "exclusive" : "borderless desktop");
+    } else {
+        SDL_SetWindowFullscreen(sdl3_window, false);
+        INFOF("returned to windowed mode");
+    }
+    SDL_SyncWindow(sdl3_window);
+    SDL_GetWindowSizeInPixels(
+        sdl3_window, &wnd_size_in_pixels.w, &wnd_size_in_pixels.h);
+}
+
+static void PollEvents(void) {
+    SDL_Event event;
+    static bool test_key_tap_sent;
+
+    if (!test_key_tap_sent) {
+        const char *test_key = getenv("RAGE_PORT_TEST_KEY_TAP");
+        if (test_key && test_key[0]) {
+            SDL_Scancode scancode = SDL_GetScancodeFromName(test_key);
+            if (scancode != SDL_SCANCODE_UNKNOWN) {
+                SDL_Event synthetic;
+                /* SDL_Event is a union: initialize the entire keyboard event,
+                 * including fields outside its first (type) member. */
+                SDL_zero(synthetic);
+                synthetic.type = SDL_EVENT_KEY_DOWN;
+                synthetic.key.scancode = scancode;
+                synthetic.key.down = true;
+                SDL_PushEvent(&synthetic);
+                synthetic.type = SDL_EVENT_KEY_UP;
+                synthetic.key.down = false;
+                SDL_PushEvent(&synthetic);
+            }
+            test_key_tap_sent = true;
+        }
+    }
+    while (SDL_PollEvent(&event)) {
+        if (overlay_event_cb) {
+            overlay_event_cb(&event);
+        }
+        switch (event.type) {
+        case SDL_EVENT_GAMEPAD_ADDED:
+            AddGamepad(event.gdevice.which);
+            break;
+        case SDL_EVENT_GAMEPAD_REMOVED:
+            RemoveGamepad(event.gdevice.which);
+            break;
+        case SDL_EVENT_QUIT:
+            quit_requested = true;
+            break;
+        case SDL_EVENT_WINDOW_RESIZED:
+            SDL_GetWindowSizeInPixels(
+                sdl3_window, &wnd_size_in_pixels.w, &wnd_size_in_pixels.h);
+            break;
+        case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+            SDL_GetWindowSizeInPixels(
+                sdl3_window, &wnd_size_in_pixels.w, &wnd_size_in_pixels.h);
+            break;
+        case SDL_EVENT_KEY_DOWN:
+            {
+                unsigned int mask =
+                    KeyboardMaskForScancode(event.key.scancode);
+                if (getenv("RAGE_PORT_INPUT_DEBUG") != NULL) {
+                    INFOF("key mapped mask=%04X", mask);
+                }
+                keyboard_held_mask |= mask;
+                if (!event.key.repeat) {
+                    keyboard_pressed_latch |= mask;
+                }
+            }
+            if (getenv("RAGE_PORT_INPUT_DEBUG") != NULL) {
+                INFOF("key down scancode=%d name=%s repeat=%d",
+                      (int)event.key.scancode,
+                      SDL_GetScancodeName(event.key.scancode),
+                      event.key.repeat ? 1 : 0);
+            }
+            if (event.key.scancode == SDL_SCANCODE_ESCAPE) {
+                quit_requested = true;
+            }
+            if (event.key.scancode == SDL_SCANCODE_F6) {
+                debug_show_vram ^= 1;
+            }
+            if (event.key.scancode == SDL_SCANCODE_F4 && !event.key.repeat) {
+                SetFullScreen(!is_fullscreen);
+            }
+            break;
+        case SDL_EVENT_KEY_UP:
+            keyboard_held_mask &=
+                ~KeyboardMaskForScancode(event.key.scancode);
+            break;
+        default:
+            break;
+        }
+    }
+    if (quit_requested) {
+        QuitPlatform();
+        exit(0);
+    }
+}
+
+typedef struct {
+    short x, y;
+    unsigned short u, v, c, t;
+    unsigned char r, g, b, a;
+    unsigned int twin;
+} Vertex;
+
+// ===== SDL3 reserved TPAGE flags, invalid on real hardware =====
+#define TPAGE_NOTEXTURE 0x8000 // flag untextured poly
+#define TPAGE_DITHER 0x4000    // flag a dithered primitive
+#define TPAGE_AUX_TEXTURE 0x0200 // sample the host-only auxiliary texture store
+
+#define VRGBA(p) (*(unsigned int*)(&((p).r)))
+#define SET_TC(p, tpage, clut)                                                 \
+    (p)->t = (u16)(tpage), (p)->c = (u16)(clut), (p)->twin = cur_twin;
+#define SET_TC_ALL(p, t, c)                                                    \
+    SET_TC(p, t, c)                                                            \
+    SET_TC(&(p)[1], t, c) SET_TC(&(p)[2], t, c) SET_TC(&(p)[3], t, c)
+
+#define MAX_VERTEX_COUNT 4096
+#define MAX_INDEX_COUNT (MAX_VERTEX_COUNT / 4 * 6)
+
+#define SEMITRANSP 0x02
+#define TEXTURED 0x04
+#define EXTRA_VERTEX 0x08
+#define GOURAUD 0x10
+#define TRIANGLE 0x20
+
+static u_short cur_tpage = 0;
+static Vertex vertex_buf[MAX_VERTEX_COUNT];
+static unsigned short index_buf[MAX_INDEX_COUNT];
+static Vertex* vertex_cur;
+static unsigned short* index_cur;
+static unsigned short n_vertices;
+static int n_indices;
+/* Compressed correction runs still consume their original logical budget:
+ * preserve flush boundaries and therefore VRAM feedback visibility. */
+static int batch_saved_vertices, batch_saved_indices;
+
+// represents a texture window as a 32-bit integer for fast aligned copies
+#define TWIN_PACK(and_x, and_y, or_x, or_y)                                    \
+    ((unsigned int)(and_x) | ((unsigned int)(and_y) << 8) |                    \
+     ((unsigned int)(or_x) << 16) | ((unsigned int)(or_y) << 24))
+static unsigned int cur_twin = TWIN_PACK(0xFF, 0xFF, 0x00, 0x00);
+
+static void Draw_EnsureBufferWillNotOverflow(int vertices, int indices) {
+    bool bufferFull = n_vertices + batch_saved_vertices + vertices > MAX_VERTEX_COUNT ||
+                      n_indices + batch_saved_indices + indices > MAX_INDEX_COUNT;
+    if (bufferFull) {
+        Draw_FlushBuffer();
+    }
+}
+static void Draw_EnqueueBuffer(int vertices, int indices) {
+    assert(n_vertices + vertices <= MAX_VERTEX_COUNT);
+    assert(n_indices + indices <= MAX_INDEX_COUNT);
+
+    vertex_cur += vertices;
+    index_cur += indices;
+    n_vertices += vertices;
+    n_indices += indices;
+}
+
+// real hardware use XY coords as signed 11-bit
+static short s11(short v) { return (short)(((v & 0x7FF) ^ 1024) - 1024); }
+
+static unsigned long long gpu_trace_order;
+static unsigned long long gpu_trace_frame = ~0ULL;
+static unsigned long long gpu_trace_requested_frame;
+static int gpu_trace_x;
+static int gpu_trace_y;
+static u16 gpu_trace_tpage;
+static u16 gpu_trace_clut;
+static bool gpu_trace_initialized;
+static bool gpu_trace_enabled;
+static bool gpu_trace_verbose_enabled;
+static bool gpu_trace_has_point;
+static bool gpu_trace_has_frame;
+static bool gpu_trace_has_tpage;
+static bool gpu_trace_has_clut;
+static bool gpu_digest_enabled;
+static unsigned long long gpu_digest_hash;
+static unsigned long long gpu_digest_count;
+static unsigned long long gpu_digest_codes[256];
+typedef struct GpuDigestGroup {
+    unsigned code;
+    unsigned tpage;
+    unsigned clut;
+    int areaLeft, areaTop, areaRight, areaBottom;
+    unsigned long long count;
+} GpuDigestGroup;
+static GpuDigestGroup gpu_digest_groups[512];
+static unsigned gpu_digest_group_count;
+static bool gpu_digest_groups_enabled;
+
+static void GpuDigestByte(unsigned value) {
+    gpu_digest_hash ^= value & 0xFF;
+    gpu_digest_hash *= 0x100000001B3ULL;
+}
+
+static void GpuDigestValue(unsigned value, int bytes) {
+    while (bytes-- > 0) {
+        GpuDigestByte(value);
+        value >>= 8;
+    }
+}
+
+static void FlushGpuDigest(void) {
+    if (!gpu_digest_enabled || gpu_trace_frame == ~0ULL) return;
+    fprintf(stderr, "gpu-digest frame=%llu count=%llu hash=%016llx codes=",
+            gpu_trace_frame, gpu_digest_count, gpu_digest_hash);
+    {
+        int code;
+        bool first = true;
+        for (code = 0; code < 256; code++) {
+            if (gpu_digest_codes[code] == 0) continue;
+            fprintf(stderr, "%s%02x:%llu", first ? "" : ",", code,
+                    gpu_digest_codes[code]);
+            first = false;
+        }
+    }
+    fputc('\n', stderr);
+    if (gpu_digest_groups_enabled) {
+        unsigned group;
+        fprintf(stderr, "gpu-groups frame=%llu groups=", gpu_trace_frame);
+        for (group = 0; group < gpu_digest_group_count; group++) {
+            const GpuDigestGroup* item = &gpu_digest_groups[group];
+            fprintf(stderr, "%s%02x/%04x/%04x@%d,%d,%d,%d:%llu",
+                    group ? "," : "", item->code, item->tpage, item->clut,
+                    item->areaLeft, item->areaTop, item->areaRight,
+                    item->areaBottom, item->count);
+        }
+        fputc('\n', stderr);
+    }
+}
+
+static void InitGpuPrimitiveTrace(void) {
+    const char* point;
+    const char* frameText;
+    const char* tpageText;
+    const char* clutText;
+    if (gpu_trace_initialized) return;
+    gpu_trace_initialized = true;
+    point = getenv("RAGE_GPU_TRACE_PIXEL");
+    frameText = getenv("RAGE_GPU_TRACE_FRAME");
+    tpageText = getenv("RAGE_GPU_TRACE_TPAGE");
+    clutText = getenv("RAGE_GPU_TRACE_CLUT");
+    gpu_digest_enabled = getenv("RAGE_GPU_DIGEST") != NULL;
+    gpu_digest_groups_enabled = getenv("RAGE_GPU_DIGEST_GROUPS") != NULL;
+    gpu_trace_has_point = point != NULL &&
+                          sscanf(point, "%d,%d", &gpu_trace_x,
+                                 &gpu_trace_y) == 2;
+    gpu_trace_has_frame = frameText != NULL;
+    gpu_trace_has_tpage = tpageText != NULL;
+    gpu_trace_has_clut = clutText != NULL;
+    gpu_trace_verbose_enabled = gpu_trace_has_point || gpu_trace_has_tpage ||
+                                gpu_trace_has_clut;
+    gpu_trace_enabled = gpu_trace_verbose_enabled || gpu_digest_enabled;
+    if (gpu_trace_has_frame) {
+        gpu_trace_requested_frame = strtoull(frameText, NULL, 0);
+    }
+    if (gpu_trace_has_tpage) gpu_trace_tpage = strtoul(tpageText, NULL, 16);
+    if (gpu_trace_has_clut) gpu_trace_clut = strtoul(clutText, NULL, 16);
+}
+
+static long TraceEdge(const Vertex* a, const Vertex* b, int x, int y,
+                      int offsetX, int offsetY) {
+    return (long)(b->x - a->x) * (y - (a->y + offsetY)) -
+           (long)(b->y - a->y) * (x - (a->x + offsetX));
+}
+
+static bool TracePointInTriangle(const Vertex* a, const Vertex* b,
+                                 const Vertex* c, int x, int y,
+                                 int offsetX, int offsetY) {
+    long area = TraceEdge(a, b, c->x + offsetX, c->y + offsetY,
+                          offsetX, offsetY);
+    long ab = TraceEdge(a, b, x, y, offsetX, offsetY);
+    long bc = TraceEdge(b, c, x, y, offsetX, offsetY);
+    long ca = TraceEdge(c, a, x, y, offsetX, offsetY);
+    return area != 0 && ((ab >= 0 && bc >= 0 && ca >= 0) ||
+                         (ab <= 0 && bc <= 0 && ca <= 0));
+}
+
+static void TraceTriangleEdges(const Vertex* a, const Vertex* b,
+                               const Vertex* c, int x, int y,
+                               int offsetX, int offsetY) {
+    long ab = TraceEdge(a, b, x, y, offsetX, offsetY);
+    long bc = TraceEdge(b, c, x, y, offsetX, offsetY);
+    long ca = TraceEdge(c, a, x, y, offsetX, offsetY);
+    fprintf(stderr, " edge=%s%s%s values=%ld,%ld,%ld",
+            ab == 0 ? "ab" : "", bc == 0 ? "bc" : "",
+            ca == 0 ? "ca" : "", ab, bc, ca);
+}
+
+static void TraceTriangleTexel(const Vertex* a, const Vertex* b,
+                               const Vertex* c, int x, int y,
+                               int offsetX, int offsetY, const char* triangle) {
+    double ax = a->x, ay = a->y;
+    double bx = b->x, by = b->y;
+    double cx = c->x, cy = c->y;
+    double px = (double)(x - offsetX);
+    double py = (double)(y - offsetY);
+    double determinant = (bx - ax) * (cy - ay) -
+                         (by - ay) * (cx - ax);
+    double dudx, dudy, dvdx, dvdy, rawU, rawV, resolvedU, resolvedV;
+    if (determinant == 0.0) return;
+    dudx = ((double)(b->u - a->u) * (cy - ay) -
+            (double)(c->u - a->u) * (by - ay)) / determinant;
+    dudy = ((bx - ax) * (double)(c->u - a->u) -
+            (cx - ax) * (double)(b->u - a->u)) / determinant;
+    dvdx = ((double)(b->v - a->v) * (cy - ay) -
+            (double)(c->v - a->v) * (by - ay)) / determinant;
+    dvdy = ((bx - ax) * (double)(c->v - a->v) -
+            (cx - ax) * (double)(b->v - a->v)) / determinant;
+    rawU = a->u + dudx * (px - ax) + dudy * (py - ay);
+    rawV = a->v + dvdx * (px - ax) + dvdy * (py - ay);
+    resolvedU = nearbyint(rawU);
+    resolvedV = nearbyint(rawV);
+    {
+        const unsigned char* twin = (const unsigned char*)&a->twin;
+        unsigned windowU = ((unsigned)resolvedU & twin[0]) | twin[2];
+        unsigned windowV = ((unsigned)resolvedV & twin[1]) | twin[3];
+        fprintf(stderr,
+                " tri=%s rawuv=%.4f,%.4f duv=%.4f,%.4f "
+                "texel=%.0f,%.0f window=%u,%u",
+                triangle, rawU, rawV, dudx, dvdy, resolvedU, resolvedV,
+                windowU, windowV);
+    }
+}
+
+static void TraceGpuPrimitive(const Vertex* v, int count, int code,
+                              u16 tpage, u16 clut,
+                              int offsetX, int offsetY,
+                              int areaLeft, int areaTop,
+                              int areaRight, int areaBottom) {
+    unsigned long long frame = gpu_stats.total_frames;
+    unsigned long long order;
+    int x = gpu_trace_x;
+    int y = gpu_trace_y;
+    int i;
+    bool covered;
+    int coveredTriangle = -1;
+
+    InitGpuPrimitiveTrace();
+    if (!gpu_trace_enabled) return;
+    x = gpu_trace_x;
+    y = gpu_trace_y;
+    if (frame != gpu_trace_frame) {
+        FlushGpuDigest();
+        gpu_trace_frame = frame;
+        gpu_trace_order = 0;
+        gpu_digest_hash = 0xCBF29CE484222325ULL;
+        gpu_digest_count = 0;
+        memset(gpu_digest_codes, 0, sizeof(gpu_digest_codes));
+        gpu_digest_group_count = 0;
+    }
+    order = gpu_trace_order++;
+    if (gpu_digest_enabled) {
+        GpuDigestValue((unsigned)code & 0xFF, 1);
+        GpuDigestValue((unsigned)tpage & 0x9FF, 2);
+        GpuDigestValue(clut, 2);
+        GpuDigestValue((unsigned)count, 1);
+        for (i = 0; i < count; i++) {
+            GpuDigestValue((unsigned)(v[i].x + offsetX), 2);
+            GpuDigestValue((unsigned)(v[i].y + offsetY), 2);
+            GpuDigestValue(v[i].u, 1);
+            GpuDigestValue(v[i].v, 1);
+            GpuDigestValue(v[i].r, 1);
+            GpuDigestValue(v[i].g, 1);
+            GpuDigestValue(v[i].b, 1);
+            GpuDigestValue(v[i].a, 1);
+        }
+        gpu_digest_count++;
+        gpu_digest_codes[(unsigned)code & 0xFF]++;
+        if (gpu_digest_groups_enabled) {
+            unsigned group;
+            unsigned normalizedCode = (unsigned)code & 0xFF;
+            unsigned normalizedTpage = (unsigned)tpage & 0x9FF;
+            for (group = 0; group < gpu_digest_group_count; group++) {
+                GpuDigestGroup* item = &gpu_digest_groups[group];
+                if (item->code == normalizedCode &&
+                    item->tpage == normalizedTpage && item->clut == clut &&
+                    item->areaLeft == areaLeft && item->areaTop == areaTop &&
+                    item->areaRight == areaRight && item->areaBottom == areaBottom) {
+                    item->count++;
+                    break;
+                }
+            }
+            if (group == gpu_digest_group_count && group < 512) {
+                GpuDigestGroup* item = &gpu_digest_groups[gpu_digest_group_count++];
+                item->code = normalizedCode;
+                item->tpage = normalizedTpage;
+                item->clut = clut;
+                item->areaLeft = areaLeft;
+                item->areaTop = areaTop;
+                item->areaRight = areaRight;
+                item->areaBottom = areaBottom;
+                item->count = 1;
+            }
+        }
+    }
+    if (!gpu_trace_verbose_enabled) return;
+    if (gpu_trace_has_frame && frame != gpu_trace_requested_frame) return;
+    if (gpu_trace_has_tpage && (tpage & 0x9FF) != gpu_trace_tpage) return;
+    if (gpu_trace_has_clut && clut != gpu_trace_clut) return;
+    covered = !gpu_trace_has_point;
+    if (gpu_trace_has_point) {
+        covered = TracePointInTriangle(&v[0], &v[1], &v[2], x, y,
+                                       offsetX, offsetY);
+        if (covered) coveredTriangle = 0;
+        if (!covered && count == 4) {
+            covered = TracePointInTriangle(&v[1], &v[3], &v[2], x, y,
+                                           offsetX, offsetY);
+            if (covered) coveredTriangle = 1;
+        }
+    }
+    if (!covered) return;
+
+    if (gpu_trace_has_point) {
+        fprintf(stderr,
+                "gpu-cover frame=%llu order=%llu pixel=%d,%d code=%02x "
+                "tpage=%04x clut=%04x area=%d,%d,%d,%d",
+                frame, order, x, y, code & 0xFF, tpage, clut,
+                areaLeft, areaTop, areaRight, areaBottom);
+        if ((code & 0x04) != 0) {
+            if (coveredTriangle == 0)
+                TraceTriangleEdges(&v[0], &v[1], &v[2], x, y,
+                                   offsetX, offsetY),
+                TraceTriangleTexel(&v[0], &v[1], &v[2], x, y,
+                                   offsetX, offsetY, "012");
+            else if (coveredTriangle == 1)
+                TraceTriangleEdges(&v[1], &v[3], &v[2], x, y,
+                                   offsetX, offsetY),
+                TraceTriangleTexel(&v[1], &v[3], &v[2], x, y,
+                                   offsetX, offsetY, "132");
+        }
+    } else {
+        fprintf(stderr,
+                "gpu-prim frame=%llu order=%llu code=%02x "
+                "tpage=%04x clut=%04x area=%d,%d,%d,%d",
+                frame, order, code & 0xFF, tpage, clut,
+                areaLeft, areaTop, areaRight, areaBottom);
+    }
+    for (i = 0; i < count; i++) {
+        fprintf(stderr, " v%d=%d,%d/%u,%u/%02x%02x%02x%02x",
+                i, v[i].x + offsetX, v[i].y + offsetY, v[i].u, v[i].v,
+                v[i].r, v[i].g, v[i].b, v[i].a);
+    }
+    fputc('\n', stderr);
+}
+
+static int writePacket(Vertex* v, int code, int n, u_long* packet, u16* pOut) {
+    int w;
+    if (!n) {
+        return 0;
+    }
+    v->x = s11(((short*)packet)[0]);
+    v->y = s11(((short*)packet)[1]);
+    packet++;
+    n--;
+    if (!n) {
+        return 1;
+    }
+    w = 1;
+    if (code & TEXTURED) {
+        v->u = ((u8*)packet)[0];
+        v->v = ((u8*)packet)[1];
+        *pOut = ((u16*)packet)[1];
+        w++;
+        packet++;
+        n--;
+        if (!n) {
+            return w;
+        }
+    } else {
+        *pOut = 0;
+    }
+    if (code & GOURAUD) {
+        v++;
+        v->r = ((u8*)packet)[0];
+        v->g = ((u8*)packet)[1];
+        v->b = ((u8*)packet)[2];
+        v->a = code & SEMITRANSP ? 0x80 : 0xFF;
+        w++;
+    }
+    return w;
+}
+
+static inline bool is_subtract_abr(const Vertex* v) {
+    return v->a == 0x80 && (v->t & 0x60) == 0x40;
+}
+
+void Draw_SetTexpageMode(ParamDrawTexpageMode* p) {
+    // implements SetDrawMode, SetDrawEnv
+    unsigned short mode = *(u_short*)p;
+    SetDither((mode & 0x200) ? 1 : 0);
+    cur_tpage = mode & 0x1FF;
+    if (p->tex_y_extra_vram) {
+        DEBUGF("tex_y_extra_vram not implemented");
+    }
+    if (p->tex_flip_x) {
+        DEBUGF("tex_flip_x not implemented");
+    }
+    if (p->tex_flip_y) {
+        DEBUGF("tex_flip_y not implemented");
+    }
+}
+void Draw_SetTextureWindow(unsigned int mask_x, unsigned int mask_y,
+                           unsigned int off_x, unsigned int off_y) {
+    mask_x &= 0x1F;
+    mask_y &= 0x1F;
+    cur_twin = TWIN_PACK(
+        (unsigned char)~(mask_x * 8), (unsigned char)~(mask_y * 8),
+        (unsigned char)((off_x & mask_x) * 8),
+        (unsigned char)((off_y & mask_y) * 8));
+}
+void Draw_SetMask(int bit0, int bit1) {
+    if (bit0 || bit1) {
+        NOT_IMPLEMENTED;
+    }
+}
+
+#endif // SDL3_COMMON_H

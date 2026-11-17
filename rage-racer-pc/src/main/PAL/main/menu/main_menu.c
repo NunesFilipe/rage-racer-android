@@ -1,0 +1,148 @@
+#include "game/asset.h"
+#include "game/audio.h"
+#include "game/frontend_internal.h"
+#include "game/menu.h"
+#include "game/menu_internal.h"
+#include "game/race.h"
+#include "game/render_internal.h"
+#include "game/save_internal.h"
+#include "game/screens.h"
+#include <string.h>
+
+enum {
+    MAIN_MENU_ROW_REVEAL_FRAMES = 8,
+    MAIN_MENU_OPEN_FRAMES =
+        0x10 + (TITLE_MENU_ITEM_COUNT - 1) * MAIN_MENU_ROW_REVEAL_FRAMES,
+};
+
+void DrawMainMenuRows(void) {
+    const Frontend *frontend = MenuFrontend();
+    GameOrderingTableEntry *ot = GamePrimaryOrderingTable(0);
+    u8 *packet = RENDER_PRIM_CURSOR_AS(u8);
+    s32 row = 0;
+    s32 item = 0;
+
+    while (item < TITLE_MENU_ITEM_COUNT) {
+        s32 clut = 0x7E85;
+        s32 height;
+        s32 delta;
+
+        if (g_ExtraGrandPrixUnlocked == 0 &&
+            item == TITLE_MENU_EXTRA_GRAND_PRIX) {
+            item = TITLE_MENU_TIME_ATTACK;
+        }
+        if (item == frontend->selection &&
+            frontend->state != FRONTEND_STATE_MENU_OPENING &&
+            (frontend->pulse & 2) == 0) {
+            clut = 0x7E86;
+        }
+
+        delta = frontend->menuSlide - row * MAIN_MENU_ROW_REVEAL_FRAMES;
+        height = delta > 0x10 ? 0x10 : delta;
+        if (height < 0) height = 0;
+
+        packet = DrawTitleMenuLabel(
+            ot, packet, (TitleMenuItem)item, 0x68, 0x64 + row * 0x18,
+            height, clut == 0x7E86);
+        item++;
+        row++;
+    }
+
+    g_RenderState.draw.packetCursor = packet;
+}
+
+void UpdateMainMenuOpen(void) {
+    Frontend *frontend = MenuFrontend();
+
+    frontend->menuSlide = AddClampedMenuValue(
+        frontend->menuSlide, 0, 0, MAIN_MENU_OPEN_FRAMES);
+    frontend->menuSlide = AddClampedMenuValue(
+        frontend->menuSlide, 1, 0, MAIN_MENU_OPEN_FRAMES);
+    if (frontend->menuSlide >= MAIN_MENU_OPEN_FRAMES) {
+        frontend->state = FRONTEND_STATE_MENU_INPUT;
+    }
+    DrawMainMenuRows();
+}
+
+static void SelectGrandPrixSave(CarEntry *cars, GameRaceProgress *progress,
+                                CourseProgressState *courseProgress,
+                                s16 series) {
+    g_CarTable = cars;
+    g_RaceProgress = progress;
+    g_CourseProgress = courseProgress;
+    g_SeriesSelection = series;
+    if (progress->maxClassReached == -1) {
+        g_GrandPrixClass = 0;
+        g_CourseIndex = 3;
+        RequestCourseTextureAssets();
+    } else {
+        RequestSelectBgmAssetsKeepAudioSlots();
+    }
+}
+
+void UpdateMainMenuInput(void) {
+    Frontend *frontend = MenuFrontend();
+    s32 oldSelection;
+    s32 direction = 0;
+    u16 pressed = g_PadPressed;
+
+    if (pressed != 0) frontend->idleTimer = 0;
+    oldSelection = frontend->selection;
+    if (pressed & PAD_UP) {
+        direction = -1;
+    } else if (pressed & PAD_DOWN) {
+        direction = 1;
+    }
+
+    frontend->selection = MoveTitleMenuSelection(
+        oldSelection, direction, g_ExtraGrandPrixUnlocked != 0);
+    if (oldSelection != frontend->selection) PlaySoundCue(1);
+
+    if (pressed & PAD_CONFIRM) {
+        PlaySoundCue(2);
+        if (!AssetLoadCompletedSuccessfully()) ResetAssetLoader();
+        ShuffleBgmOrder();
+        g_RaceSession.kind = RACE_SESSION_STANDARD;
+        switch (frontend->selection) {
+        case TITLE_MENU_GRAND_PRIX:
+            SelectGrandPrixSave(g_GrandPrixCars, &g_GrandPrixSave,
+                                &g_GrandPrixCourseProgress, 0);
+            break;
+        case TITLE_MENU_EXTRA_GRAND_PRIX:
+            SelectGrandPrixSave(g_ExtraGrandPrixCars, &g_ExtraGrandPrixSave,
+                                &g_ExtraGrandPrixCourseProgress, 1);
+            break;
+        case TITLE_MENU_TIME_ATTACK:
+            g_CarTable = g_TimeAttackCars;
+            g_RaceProgress = &g_TimeAttackSave;
+            g_SeriesSelection = 0;
+            RequestSelectBgmAssetsKeepAudioSlots();
+            break;
+        case TITLE_MENU_CUSTOM:
+            g_RaceSession.kind = RACE_SESSION_CUSTOM;
+            g_RaceSession.course = 0;
+            g_RaceSession.classIndex = 0;
+            g_RaceSession.model = 3;
+            memcpy(g_RaceSession.cars, g_TimeAttackCars,
+                   sizeof(g_RaceSession.cars));
+            for (s32 car = 0; car < GAME_CAR_COUNT; ++car) {
+                g_RaceSession.cars[car].enabled = 1;
+            }
+            g_CarTable = g_RaceSession.cars;
+            g_RaceProgress = &g_TimeAttackSave;
+            g_CourseProgress = NULL;
+            g_SeriesSelection = 0;
+            RequestSelectBgmAssetsKeepAudioSlots();
+            break;
+        case TITLE_MENU_LOAD_SAVE:
+            RequestSaveScreenAssets();
+            break;
+        case TITLE_MENU_OPTIONS:
+            RequestOptionScreenAssets();
+            MenuOption()->cursor = 0;
+            break;
+        }
+        frontend->state = FRONTEND_STATE_MENU_EXIT;
+    }
+    DrawMainMenuRows();
+}

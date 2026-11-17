@@ -1,0 +1,87 @@
+#include "game/car.h"
+#include "car_catalog.h"
+
+#include <string.h>
+
+enum {
+    LIMITED_VARIANT_MODEL = 8,
+    LIMITED_VARIANT_MAXIMUM = 2,
+    FIRST_FIXED_ASSET_MODEL = 9,
+};
+
+static u8 s_makers[GAME_CAR_COUNT] = {
+    CAR_MAKER_AGE, CAR_MAKER_AGE, CAR_MAKER_AGE, CAR_MAKER_GNADE,
+    CAR_MAKER_LEIZARD, CAR_MAKER_LEIZARD, CAR_MAKER_LEIZARD,
+    CAR_MAKER_ASSOLUTO, CAR_MAKER_ASSOLUTO, CAR_MAKER_ASSOLUTO,
+    CAR_MAKER_AGE, CAR_MAKER_LEIZARD, CAR_MAKER_ASSOLUTO,
+};
+
+CarMaker GetCarMaker(s32 model) {
+    return (u32)model < GAME_CAR_COUNT
+        ? (CarMaker)s_makers[model] : CAR_MAKER_GNADE;
+}
+
+void SetCarMaker(s32 model, const char *name) {
+    static const char *const names[CAR_MAKER_COUNT] = {
+        "GNADE", "AGE", "LEIZARD", "ASSOLUTO",
+    };
+    CarMaker maker;
+
+    if ((u32)model >= GAME_CAR_COUNT) return;
+    s_makers[model] = CAR_MAKER_GNADE;
+    for (maker = 0; maker < CAR_MAKER_COUNT; maker++) {
+        if (strcmp(name, names[maker]) == 0) {
+            s_makers[model] = (u8)maker;
+            return;
+        }
+    }
+}
+
+s32 GetCarAssetIndex(s32 model, s32 grade) {
+    s32 firstVariant;
+
+    if ((u32)model >= GAME_CAR_COUNT || grade < 0) {
+        return -1;
+    }
+
+    firstVariant = g_CarModelBaseIndex[model];
+    if (grade >= CAR_MODEL_VARIANT_COUNT - firstVariant) {
+        return -1;
+    }
+    return firstVariant + grade;
+}
+
+s32 GetCarUnlockLevel(s32 model) {
+    if ((u32)model >= GAME_CAR_COUNT || g_CarTable == NULL) {
+        return -1;
+    }
+    return CarCatalogUnlockClass(model, g_CarTable[model].modelVariant,
+        g_CarTable[model].modelVariant + g_CarModelUnlockBase[model]);
+}
+
+s32 GetOwnedCarAssetIndex(s32 model) {
+    s32 variant;
+
+    if ((u32)model >= GAME_CAR_COUNT) {
+        return -1;
+    }
+    if (model >= FIRST_FIXED_ASSET_MODEL) {
+        return g_CarModelBaseIndex[model];
+    }
+    if (g_CarTable == NULL) {
+        return -1;
+    }
+
+    variant = g_CarTable[model].modelVariant;
+    if (model == LIMITED_VARIANT_MODEL) {
+        if (variant > LIMITED_VARIANT_MAXIMUM) {
+            variant = LIMITED_VARIANT_MAXIMUM;
+        }
+        return GetCarAssetIndex(model, variant);
+    }
+    if (variant >= g_CarModelBaseIndex[model + 1] -
+                       g_CarModelBaseIndex[model]) {
+        return -1;
+    }
+    return GetCarAssetIndex(model, variant);
+}

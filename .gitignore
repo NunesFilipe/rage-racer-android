@@ -1,0 +1,45 @@
+# ==========================================
+# Rage Racer Android - Git Ignore
+# ==========================================
+
+# Commercial Game ROMs & Disc Images (Legal / DMCA compliance)
+*.chd
+*.bin
+*.cue
+*.iso
+Rage Racer/
+Rage Racer.chd
+*.mcr
+bu00/
+bu10/
+
+# Compiled APKs & Outputs (>100MB / binary outputs)
+*.apk
+*.aab
+RageRacer-Android.apk
+
+# Android Build Outputs & Caches
+android/build/
+android/app/build/
+android/.gradle/
+android/app/.cxx/
+android/local.properties
+android/.idea/
+*.iml
+.gradle/
+build/
+
+# Native CMake / C++ Build Artifacts
+rage-racer-pc/build/
+rage-racer-pc/CMakeSettings.json
+rage-racer-pc/.vs/
+CMakeFiles/
+CMakeCache.txt
+
+# Logs & Temporary Files
+*.log
+rage-racer.log
+**/.git_upstream_backup/
+.git_upstream_backup/
+.DS_Store
+Thumbs.db

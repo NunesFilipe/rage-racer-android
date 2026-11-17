@@ -1,0 +1,71 @@
+CMAKE_GEN ?= Ninja
+CMAKE_BUILD_TYPE ?= Release
+
+.PHONY: all clean format test test-psp-emu test-psp-hw test-wine help
+
+all: build/native/libpsyz.a
+
+# native build
+build/native/libpsyz.a: CMakeLists.txt $(shell find src include -type f)
+	cmake -G$(CMAKE_GEN) -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) -B build/native
+	cmake --build build/native
+
+# cross-compilation build
+build/%/libpsyz.a: CMakeLists.txt cmake/%.cmake $(shell find src include -type f)
+	cmake -G$(CMAKE_GEN) -DCMAKE_TOOLCHAIN_FILE=cmake/$*.cmake -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) -B build/$*
+	cmake --build build/$*
+
+UNAME_S := $(shell uname)
+
+test:
+	@mkdir -p tests/build/sdl3-gpu-hw
+	cmake -G$(CMAKE_GEN) -DGTE_USE_HW_SQRT=ON -DCMAKE_BUILD_TYPE=Debug -S tests/ -B tests/build/sdl3-gpu-hw
+	cmake --build tests/build/sdl3-gpu-hw
+ifeq ($(UNAME_S),Linux)
+	cd tests && SDL_VIDEODRIVER=offscreen ./build/sdl3-gpu-hw/psyz_tests
+else
+	cd tests && ./build/sdl3-gpu-hw/psyz_tests
+endif
+
+ifneq ($(UNAME_S),Darwin)
+	@mkdir -p tests/build/sdl3-gl-sw
+	cmake -G$(CMAKE_GEN) -DPSYZ_RENDERER=sdl3_gl -DGTE_USE_HW_SQRT=OFF -DCMAKE_BUILD_TYPE=Debug -S tests/ -B tests/build/sdl3-gl-sw
+	cmake --build tests/build/sdl3-gl-sw
+ifeq ($(UNAME_S),Linux)
+	cd tests && SDL_VIDEODRIVER=offscreen ./build/sdl3-gl-sw/psyz_tests --gtest_filter='gpu_Test.*'
+else
+	cd tests && ./build/sdl3-gl-sw/psyz_tests --gtest_filter='gpu_Test.*'
+endif
+endif
+
+PSP_TEST_CMAKE = cmake -G$(CMAKE_GEN) -DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/src/psp/psp.cmake -DCMAKE_BUILD_TYPE=Debug -S tests/ -B tests/build/psp
+test-psp-emu:
+	$(PSP_TEST_CMAKE) -DBUILD_PRX=OFF -DIS_PPSSPP_EMU=1
+	cmake --build tests/build/psp
+	tests/target/runner_psp.py emu
+
+test-psp-hw:
+	$(PSP_TEST_CMAKE) -DBUILD_PRX=ON
+	cmake --build tests/build/psp
+	tests/target/runner_psp.py hw
+
+test-wine:
+	@mkdir -p tests/build/wine
+	cmake -G$(CMAKE_GEN) -DCMAKE_TOOLCHAIN_FILE=../cmake/windows-x86_64.cmake -DCMAKE_BUILD_TYPE=Debug -S tests/ -B tests/build/wine
+	cmake --build tests/build/wine
+	cd tests && WINEPATH="/usr/x86_64-w64-mingw32/bin;build/wine/build/sdl" WINEDEBUG=-all SDL_VIDEODRIVER=offscreen wine ./build/wine/psyz_tests.exe
+
+clean:
+	rm -rf build tests/build
+
+CLANG_FORMAT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../bin/clang-format
+CLANG_FORMAT_URL := https://github.com/Xeeynamo/llvm-clang-format-tidy/releases/download/llvmorg-22.1.4/clang-format.xz
+
+$(CLANG_FORMAT):
+	@cd $(dir $(CLANG_FORMAT)) && wget --quiet -O clang-format.xz $(CLANG_FORMAT_URL)
+	@cd $(dir $(CLANG_FORMAT)) && sha256sum -c clang-format.xz.sha256
+	@cd $(dir $(CLANG_FORMAT)) && xz -d clang-format.xz
+	@chmod +x $@
+
+format: $(CLANG_FORMAT)
+	find src psxgen tests -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 -P$$(nproc) -n1 $(CLANG_FORMAT) -i

@@ -1,0 +1,121 @@
+#include "common.h"
+#include "game/audio.h"
+#include "game/audio_internal.h"
+#include "game/sound.h"
+#include "psyq/snd.h"
+
+#include <stdio.h>
+#include <string.h>
+
+MusicChannel g_MusicChannels[AUDIO_MUSIC_CHANNEL_COUNT];
+EffectVoice g_EffectVoices[AUDIO_EFFECT_VOICE_COUNT];
+Audio g_Audio;
+EngineSoundState g_EngineSoundState;
+s32 g_PlayerCarIndex;
+
+static s32 s_vmInitCalls;
+static s32 s_voiceCount;
+static s32 s_reverbLeft;
+static s32 s_reverbRight;
+static s32 s_refreshCalls;
+static s32 s_slotEnableCalls;
+static s32 s_slotEnable[2];
+static s32 s_presetType;
+static s32 s_loadedScale;
+static s32 s_failures;
+
+void _SsVmInit(int voices) {
+    if (voices == 0) s_vmInitCalls++;
+}
+char SsSetReservedVoice(char voices) {
+    s_voiceCount = voices;
+    return voices;
+}
+void SetDefaultReverbDepth(void) {
+    s_reverbLeft = 40;
+    s_reverbRight = 40;
+}
+void RefreshSequenceVolumeScale(void) { s_refreshCalls++; }
+void SetSoundSlotVoicesEnabled(s32 enabled) {
+    if (s_slotEnableCalls < 2) {
+        s_slotEnable[s_slotEnableCalls] = enabled;
+    }
+    s_slotEnableCalls++;
+}
+void SetReverbPreset(s32 type, s32 left, s32 right) {
+    (void)left;
+    (void)right;
+    s_presetType = type;
+}
+void SetLoadedTableVolumeScale(s32 scale) { s_loadedScale = scale; }
+s32 GetOwnedCarAssetIndex(s32 model) { return model + 1; }
+
+static void Check(s32 condition, const char *label) {
+    if (!condition) {
+        printf("FAIL %s\n", label);
+        s_failures++;
+    }
+}
+
+static void TestSequenceInitialization(void) {
+    g_Audio.reverb.fade = -3;
+    s_vmInitCalls = 0;
+    InitSequenceAudio();
+    Check(s_vmInitCalls == 1 && s_voiceCount == 18,
+          "sequence initialization resets libsnd with eighteen voices");
+    Check(s_reverbLeft == 40 && s_reverbRight == 40 &&
+              g_Audio.reverb.fade == 0 && s_refreshCalls == 1,
+          "sequence initialization restores reverb and saved volume");
+}
+
+static void TestEffectInitialization(void) {
+    s32 index;
+
+    memset(g_MusicChannels, 0x7F, sizeof(g_MusicChannels));
+    memset(g_EffectVoices, 0x7F, sizeof(g_EffectVoices));
+    g_Audio.cue.active = 15;
+    g_Audio.cue.previous = 15;
+    g_Audio.indexed.volume = 127;
+    g_PlayerCarIndex = 2;
+    g_EngineSoundState.bank = 1;
+    s_vmInitCalls = 0;
+    s_slotEnableCalls = 0;
+    InitEffectVoiceRuntime();
+
+    Check(s_vmInitCalls == 1 && s_voiceCount == 8,
+          "effect initialization resets libsnd with eight voices");
+    for (index = 0; index < 2; index++) {
+        Check(g_MusicChannels[index].mode == MUSIC_CHANNEL_IDLE &&
+                  g_MusicChannels[index].volLeft == 0 &&
+                  g_MusicChannels[index].volRight == 0,
+              "effect initialization resets music channel state");
+    }
+    for (index = 0; index < 4; index++) {
+        Check(g_EffectVoices[index].state == EFFECT_VOICE_IDLE &&
+                  g_EffectVoices[index].pitch.value == 0x1E00,
+              "effect initialization resets effect voice state");
+    }
+    Check(g_Audio.cue.active == -1 && g_Audio.cue.previous == -1,
+          "effect initialization clears special cue deduplication");
+    Check(g_Audio.indexed.volume == 0,
+          "effect initialization clears indexed effect volume");
+    Check(s_slotEnableCalls == 2 && s_slotEnable[0] == 0 &&
+              s_slotEnable[1] == 1 && g_EngineSoundState.bank == -1,
+          "effect initialization rebuilds engine voices and bank state");
+    Check(s_presetType == 2 && s_loadedScale == 23,
+          "effect initialization selects reverb and car volume");
+
+    g_PlayerCarIndex = -2;
+    InitEffectVoiceRuntime();
+    Check(s_loadedScale == 20,
+          "invalid car asset uses the base volume scale");
+}
+
+int main(void) {
+    TestSequenceInitialization();
+    TestEffectInitialization();
+
+    if (s_failures != 0) return 1;
+    puts("audio initialization shares voice reset and applies mode settings");
+    return 0;
+}

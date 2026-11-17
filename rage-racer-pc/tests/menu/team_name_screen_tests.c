@@ -1,0 +1,188 @@
+#include "common.h"
+#include "game/menu.h"
+#include "game/menu_internal.h"
+
+#include <stdio.h>
+#include <string.h>
+
+extern s32 g_MenuHandlerIndex;
+extern s32 g_MenuOutgoingHandlerIndex;
+extern s32 g_MenuScreen;
+
+void MenuActivateScreen(s32 screen) {
+    g_MenuScreen = screen;
+    g_MenuHandlerIndex = screen;
+}
+void MenuBeginExit(s32 screen) {
+    g_MenuHandlerIndex = -1;
+    g_MenuOutgoingHandlerIndex = screen;
+}
+
+s32 GameMenuBusy;
+s32 GameMenuCursor;
+s32 GameMenuCursorAnim;
+s32 g_MenuHandlerIndex;
+s32 g_MenuOutgoingHandlerIndex;
+s32 g_MenuOverlayPattern;
+s32 g_MenuScreen;
+s32 g_MenuViewAngle;
+s32 g_MenuViewAngleTarget;
+s32 g_MenuViewOffset;
+s32 g_MenuViewOffsetTarget;
+u16 g_PadPressed;
+u16 g_PadPressedRepeat;
+u8 g_TeamNameChars[16];
+u8 g_TeamNameLength;
+s32 g_UiScriptProgress;
+TimedDrawCommand g_NativeTeamNameScreenScript[61];
+
+static TeamName s_teamName;
+TeamName *MenuTeamName(void) { return &s_teamName; }
+
+static s32 s_lastCue;
+static s32 s_uploadCalls;
+static s32 s_uploadedLength;
+
+s32 RunTimedDrawScript(const TimedDrawCommand *commands, s32 *progress,
+                       s32 step) {
+    (void)commands;
+    if (step < 0) {
+        *progress = 0;
+    }
+    return 1;
+}
+void PlaySoundCue(s32 cue) { s_lastCue = cue; }
+void DrawTeamNameCharModel(TeamName *teamName) { (void)teamName; }
+void DrawTeamNameEntry(TeamName *teamName, s32 step, s32 cursor) {
+    (void)teamName;
+    (void)step;
+    (void)cursor;
+}
+void UploadTeamNameTexture(const u8 *text, s32 length) {
+    (void)text;
+    s_uploadCalls++;
+    s_uploadedLength = length;
+}
+
+static void Reset(void) {
+    GameMenuBusy = 0;
+    GameMenuCursor = 0;
+    GameMenuCursorAnim = -1;
+    g_MenuOverlayPattern = 0;
+    g_MenuViewAngle = 0;
+    g_MenuViewAngleTarget = 1;
+    g_MenuViewOffset = 0;
+    g_MenuViewOffsetTarget = 0;
+    g_PadPressed = 0;
+    g_PadPressedRepeat = 0;
+    memset(g_TeamNameChars, 0, sizeof(g_TeamNameChars));
+    g_TeamNameLength = 0;
+    g_UiScriptProgress = 0;
+    s_lastCue = -1;
+    s_uploadCalls = 0;
+    s_uploadedLength = -1;
+}
+
+#define CHECK(condition)                                                       \
+    do {                                                                       \
+        if (!(condition)) {                                                    \
+            fprintf(stderr, "check failed at line %d: %s\n", __LINE__,         \
+                    #condition);                                               \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+static int CheckCursorMove(s32 from, u16 pressed, s32 expected) {
+    Reset();
+    GameMenuCursor = from;
+    g_PadPressedRepeat = pressed;
+    UpdateTeamNameScreen();
+    CHECK(GameMenuCursor == expected);
+    CHECK(GameMenuCursorAnim == expected);
+    CHECK(g_MenuViewAngle == TEAM_NAME_CURSOR_ENTRY_ANGLE);
+    CHECK(g_MenuViewAngleTarget == 0);
+    CHECK(s_lastCue == 1);
+    return 0;
+}
+
+int main(void) {
+    if (CheckCursorMove(0, PAD_UP, 33) ||
+        CheckCursorMove(33, PAD_DOWN, 0) ||
+        CheckCursorMove(0, PAD_LEFT, 10) ||
+        CheckCursorMove(10, PAD_RIGHT, 0)) {
+        return 1;
+    }
+
+    if (CheckCursorMove(0, PAD_UP | PAD_LEFT, 43) ||
+        CheckCursorMove(43, PAD_DOWN | PAD_RIGHT, 0)) {
+        return 1;
+    }
+
+    Reset();
+    g_TeamNameLength = 6;
+    GameMenuCursor = 0x2A;
+    g_PadPressedRepeat = PAD_RIGHT;
+    UpdateTeamNameScreen();
+    CHECK(GameMenuCursor == 0x2B);
+
+    Reset();
+    GameMenuCursor = 5;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateTeamNameScreen();
+    CHECK(g_TeamNameLength == 1);
+    CHECK(g_TeamNameChars[0] == 5);
+    CHECK(s_lastCue == 2);
+
+    Reset();
+    g_TeamNameLength = 2;
+    g_PadPressed = PAD_CANCEL;
+    UpdateTeamNameScreen();
+    CHECK(g_TeamNameLength == 1);
+    CHECK(g_TeamNameChars[1] == 0xA);
+    CHECK(s_lastCue == 4);
+
+    Reset();
+    g_TeamNameLength = MENU_TEAM_NAME_MAX_LENGTH;
+    GameMenuCursor = 5;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateTeamNameScreen();
+    CHECK(g_TeamNameLength == MENU_TEAM_NAME_MAX_LENGTH);
+    CHECK(g_TeamNameChars[MENU_TEAM_NAME_MAX_LENGTH] == 0);
+    CHECK(s_lastCue == -1);
+
+    Reset();
+    g_TeamNameLength = 0xFF;
+    GameMenuCursor = INT32_MIN;
+    GameMenuCursorAnim = INT32_MAX;
+    UpdateTeamNameScreen();
+    CHECK(g_TeamNameLength == MENU_TEAM_NAME_MAX_LENGTH);
+    CHECK(GameMenuCursor == 0);
+    CHECK(GameMenuCursorAnim == TEAM_NAME_KEY_END);
+
+    Reset();
+    GameMenuCursor = 0x2B;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateTeamNameScreen();
+    CHECK(GameMenuBusy == 1);
+    CHECK(g_MenuOverlayPattern == 2);
+    CHECK(g_MenuViewOffsetTarget == 0x3D090);
+
+    Reset();
+    GameMenuBusy = 1;
+    g_TeamNameLength = 4;
+    g_MenuViewOffset = 0x3D090;
+    UpdateTeamNameScreen();
+    CHECK(g_MenuScreen == 6);
+    CHECK(GameMenuBusy == 0);
+    CHECK(s_uploadCalls == 1);
+    CHECK(s_uploadedLength == 4);
+
+    Reset();
+    GameMenuBusy = INT32_MIN;
+    g_MenuViewOffset = 0x3D090;
+    UpdateTeamNameScreen();
+    CHECK(GameMenuBusy == 0 && s_uploadCalls == 0);
+
+    puts("team name screen tests passed");
+    return 0;
+}

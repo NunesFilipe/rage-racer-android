@@ -1,0 +1,654 @@
+/*
+ * How a rival decides which way to go round the car in front of it.
+ *
+ * The function sorts every other car that is ahead and close into three
+ * buckets: to the left, roughly in front, and to the right. Each one is
+ * weighted by how near it is, and the emptiest side becomes the offset the
+ * rival steers towards. Being boxed in also damps how hard it may accelerate.
+ *
+ * It came back with names like acc8, acc9, k11, t6, a2 and carA4low, and
+ * nothing covered it. This is a characterisation test: it does not say the
+ * behaviour is right, only that it is what it was, so the shape can be
+ * changed without the answers moving.
+ *
+ * The traffic is built here rather than driven, so the sweep is repeatable.
+ */
+
+#include "common.h"
+#include "game/car.h"
+#include "game/car_internal.h"
+#include "game/player_car_internal.h"
+#include "game/race.h"
+#include "game/state.h"
+#include "game/track.h"
+
+#include <limits.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Everything the file reaches for that this sweep does not exercise. The
+ * sound cue belongs to the rival chatter further down the same file. */
+GameCarRuntime g_Cars[11];
+PlayerCarRuntime g_PlayerCar;
+
+static s32 s_lastCue;
+static s32 s_cueCalls;
+
+void PlaySoundCue(s32 cue) {
+    s_lastCue = cue;
+    s_cueCalls++;
+}
+
+enum { RIVAL_SLOTS = 11, TRACK_LENGTH = 0x8000 };
+
+/* No second car at all, for the cases that do not need one. */
+#define NO_BLOCKER 0x7FFF
+
+static unsigned long s_digest = 2166136261UL;
+
+static int CheckContenderRanking(void) {
+    static const s32 cases[][RIVAL_CONTENDER_COUNT] = {
+        {10, 40, 20, 30},
+        {40, 30, 20, 10},
+        {10, 20, 30, 40},
+        {20, 20, 20, 20},
+        {30, 10, 30, 10},
+    };
+    static const s32 expected[][RIVAL_CONTENDER_COUNT] = {
+        {1, 3, 2, 0},
+        {0, 1, 2, 3},
+        {3, 2, 1, 0},
+        {0, 1, 2, 3},
+        {0, 2, 1, 3},
+    };
+    size_t test;
+
+    for (test = 0; test < sizeof(cases) / sizeof(cases[0]); test++) {
+        s32 rank;
+
+        memset(g_Cars, 0, sizeof(g_Cars));
+        for (rank = 0; rank < RIVAL_CONTENDER_COUNT; rank++) {
+            g_Cars[rank].progressA = cases[test][rank] - rank;
+            g_Cars[rank].progressB = rank;
+        }
+        RankContenders();
+
+        for (rank = 0; rank < RIVAL_CONTENDER_COUNT; rank++) {
+            s32 actual = (s32)(g_RankedCars[rank] - g_Cars);
+            if (actual != expected[test][rank]) {
+                printf("ranking case %lu rank %d selected car %d, expected %d\n",
+                       (unsigned long)test, rank, actual, expected[test][rank]);
+                return 1;
+            }
+        }
+    }
+
+    memset(g_Cars, 0, sizeof(g_Cars));
+    g_Cars[0].progressA = INT_MAX;
+    g_Cars[0].progressB = 1;
+    g_Cars[1].progressA = INT_MIN;
+    g_Cars[2].progressA = INT_MIN;
+    g_Cars[2].progressB = 1;
+    g_Cars[3].progressA = INT_MIN;
+    g_Cars[3].progressB = 2;
+    RankContenders();
+    if (g_RankedCars[0] != &g_Cars[3] ||
+        g_RankedCars[1] != &g_Cars[2] ||
+        g_RankedCars[2] != &g_Cars[0] ||
+        g_RankedCars[3] != &g_Cars[1]) {
+        puts("wrapped contender progress was ranked incorrectly");
+        return 1;
+    }
+
+    memset(g_Cars, 0, sizeof(g_Cars));
+    g_Cars[0].progressA = 10;
+    g_Cars[1].activeFlag = -1;
+    g_Cars[1].progressA = 100;
+    g_Cars[2].progressA = 30;
+    g_Cars[3].activeFlag = -1;
+    g_Cars[3].progressA = 200;
+    RankContenders();
+    if (g_RankedCars[0] != &g_Cars[2] ||
+        g_RankedCars[1] != &g_Cars[0] ||
+        g_RankedCars[2] != NULL || g_RankedCars[3] != NULL) {
+        puts("disabled contenders were included in the ranking");
+        return 1;
+    }
+    return 0;
+}
+
+static int CheckDistantRivalSlowdown(void) {
+    static const struct {
+        s32 gap;
+        s16 speed;
+        s16 expectedLimit;
+    } cases[] = {
+        {0x27FF, 0x385, 1000},
+        {0x2800, 0x384, 1000},
+        {0x2800, 0x385, 850},
+        {0x3000, 0x500, 850},
+    };
+    size_t test;
+
+    for (test = 0; test < sizeof(cases) / sizeof(cases[0]); test++) {
+        GameCarRuntime *car = &g_Cars[1];
+        GameCarRuntime *rivalAhead = &g_Cars[0];
+
+        memset(g_Cars, 0, sizeof(g_Cars));
+        car->progressA = 0x1000;
+        car->progressB = 0x200;
+        rivalAhead->progressA = 0x1000 + cases[test].gap;
+        rivalAhead->progressB = 0x200;
+        rivalAhead->speed = cases[test].speed;
+        rivalAhead->accelerationLimit = 1000;
+        g_RankedCars[0] = rivalAhead;
+        g_RankedCars[1] = car;
+
+        SlowRivalAhead(1);
+        if (rivalAhead->accelerationLimit != cases[test].expectedLimit) {
+            printf("slowdown case %lu produced limit %d, expected %d\n",
+                   (unsigned long)test, rivalAhead->accelerationLimit,
+                   cases[test].expectedLimit);
+            return 1;
+        }
+    }
+
+    memset(g_RankedCars, 0, sizeof(g_RankedCars));
+    SlowRivalAhead(0);
+    SlowRivalAhead(4);
+    SlowRivalAhead(1);
+
+    memset(g_Cars, 0, sizeof(g_Cars));
+    g_Cars[0].progressA = INT_MIN;
+    g_Cars[0].speed = 0x385;
+    g_Cars[0].accelerationLimit = 1000;
+    g_Cars[1].progressA = INT_MAX;
+    g_Cars[1].progressB = 1;
+    g_RankedCars[0] = &g_Cars[0];
+    g_RankedCars[1] = &g_Cars[1];
+    SlowRivalAhead(1);
+    if (g_Cars[0].accelerationLimit != 1000) {
+        puts("wrapped equal progress slowed the leading rival");
+        return 1;
+    }
+    return 0;
+}
+
+static void ResetRubberBandState(void) {
+    s32 rank;
+
+    memset(g_Cars, 0, sizeof(g_Cars));
+    memset(&g_PlayerCar, 0, sizeof(g_PlayerCar));
+    for (rank = 0; rank < RIVAL_CONTENDER_COUNT; rank++) {
+        g_Cars[rank].progressA = -0x3000;
+        g_Cars[rank].accelerationLimit = 1000;
+        g_RankedCars[rank] = &g_Cars[rank];
+    }
+    g_CourseIndex = 0;
+    g_RacePhase = 2;
+    g_RivalCueEnabled = 1;
+    g_RivalCueFlags = 0;
+    memset(g_RivalCueCooldowns, 0, sizeof(g_RivalCueCooldowns));
+    g_PlayerCar.drive.racePosition = 1;
+    g_SceneTimer = 0;
+    g_ClosestRivalRank = -1;
+    s_lastCue = -1;
+    s_cueCalls = 0;
+}
+
+static int CheckRubberBandBranches(void) {
+    GameCarRuntime *rival;
+
+    ResetRubberBandState();
+    rival = &g_Cars[3];
+    rival->progressA = 0xE01;
+    rival->speed = 0x321;
+    g_RivalCueFlags = 0x20;
+    UpdateRivalRubberBand();
+    if (rival->accelerationLimit != 900 || (g_RivalCueFlags & 0x20) ||
+        g_ClosestRivalRank != 3) {
+        printf("far-ahead rival branch failed\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    rival = &g_Cars[3];
+    rival->progressA = 0xE00;
+    rival->speed = 0x3E9;
+    UpdateRivalRubberBand();
+    if (rival->accelerationLimit != 980) {
+        printf("exact far boundary did not use near-ahead damping\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    rival = &g_Cars[3];
+    rival->progressA = 0xE01;
+    rival->speed = 0x320;
+    UpdateRivalRubberBand();
+    if (rival->accelerationLimit != 1000) {
+        printf("far-ahead damping ignored its speed threshold\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    rival = &g_Cars[3];
+    rival->progressA = 0x601;
+    rival->speed = 0x3E9;
+    g_RivalCueCooldowns[3] = 0x12D;
+    UpdateRivalRubberBand();
+    if (rival->accelerationLimit != 980 || !(g_RivalCueFlags & 2) ||
+        g_RivalCueCooldowns[3] != 0) {
+        printf("near-ahead rival branch failed\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    rival = &g_Cars[3];
+    rival->progressA = 0x600;
+    g_SceneTimer = 2;
+    g_RivalCueCooldowns[3] = 123;
+    UpdateRivalRubberBand();
+    if (s_cueCalls != 1 || s_lastCue != 0x34 ||
+        !(g_RivalCueFlags & 0x20) || g_RivalCueCooldowns[3] != 0) {
+        printf("close-ahead rival cue branch failed\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    g_Cars[0].progressA = -0x1C01;
+    UpdateRivalRubberBand();
+    if (s_cueCalls != 1 || s_lastCue != 0x2D || !(g_RivalCueFlags & 1)) {
+        printf("distant trailing leader cue branch failed\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    g_Cars[0].progressA = -0x1C00;
+    UpdateRivalRubberBand();
+    if (s_cueCalls != 0) {
+        printf("exact distant trailing boundary played a cue\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    g_Cars[2].progressA = -0x7FF;
+    g_SceneTimer = 1;
+    g_RivalCueFlags = 1;
+    UpdateRivalRubberBand();
+    if (s_cueCalls != 1 || s_lastCue != 0x2F || !(g_RivalCueFlags & 4)) {
+        printf("near trailing rival cue branch failed\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    g_Cars[1].progressA = -0x900;
+    g_RivalCueFlags = 8 | 1;
+    g_RivalCueCooldowns[1] = 0x12D;
+    UpdateRivalRubberBand();
+    if (s_cueCalls != 1 || s_lastCue != 0x36 || g_RivalCueCooldowns[1] != 0) {
+        printf("repeated trailing rival cue branch failed\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    g_CourseIndex = 3;
+    rival = &g_Cars[3];
+    rival->progressA = 0xE01;
+    rival->speed = 0x3E9;
+    UpdateRivalRubberBand();
+    if (rival->accelerationLimit != 980) {
+        printf("course-four rubber-band distance failed\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    g_RacePhase = 4;
+    g_Cars[3].progressA = 0x2000;
+    UpdateRivalRubberBand();
+    if (g_Cars[3].accelerationLimit != 1000 || g_ClosestRivalRank != -1 ||
+        s_cueCalls != 0) {
+        printf("finished-race rubber-band guard failed\n");
+        return 1;
+    }
+
+    ResetRubberBandState();
+    g_ClosestRivalRank = 3;
+    UpdateRivalRubberBand();
+    if (g_ClosestRivalRank != -1) {
+        printf("trailing field retained stale closest rank %d\n",
+               g_ClosestRivalRank);
+        return 1;
+    }
+
+    ResetRubberBandState();
+    g_PlayerCar.progressA = INT_MAX;
+    g_PlayerCar.progressB = 1;
+    g_Cars[3].progressA = INT_MIN;
+    g_Cars[3].progressB = 0;
+    UpdateRivalRubberBand();
+    if (g_ClosestRivalRank != 3) {
+        puts("wrapped race progress did not identify the nearest rival");
+        return 1;
+    }
+
+    return 0;
+}
+
+static void FoldText(FILE *out, const char *text) {
+    const char *p;
+    for (p = text; *p != '\0'; p++) {
+        s_digest = (s_digest ^ (unsigned char)*p) * 16777619UL;
+        s_digest &= 0xFFFFFFFFUL;
+    }
+    if (out != NULL) fputs(text, out);
+}
+
+static void Fold(FILE *out, const char *label, const GameCarRuntime *car) {
+    char state[256];
+    snprintf(state, sizeof(state),
+             " -> step=%d active=%d target=%d lateral=%d nearby=%u limit=%d\n",
+             (int)(u16)car->avoidanceStep, (int)car->avoidanceActive,
+             (int)car->avoidanceTargetOffset, (int)(u16)car->aiLateralOffset,
+             (unsigned)(u16)car->nearbyCarCount,
+             (int)car->accelerationLimit);
+    FoldText(out, label);
+    FoldText(out, state);
+}
+
+/*
+ * Four layouts, chosen to reach each way the buckets can fill: nobody at all,
+ * a wall right across the road, traffic only on one side, and one car so close
+ * that it lands in the separate near-miss count the function keeps.
+ */
+static void BuildTraffic(int layout, s32 subjectProgress, s32 subjectOffset) {
+    s32 i;
+
+    memset(g_Cars, 0, sizeof(g_Cars[0]) * RIVAL_SLOTS);
+    for (i = 0; i < RIVAL_SLOTS; i++) g_Cars[i].activeFlag = -1;
+    memset(&g_PlayerCar, 0, sizeof(g_PlayerCar));
+    g_PlayerCar.trackProgress = subjectProgress + 0x900;
+    g_PlayerCar.trackLateralOffset = subjectOffset;
+    g_PlayerCar.speed = 0x120;
+
+    if (layout == 0) return;
+
+    for (i = 0; i < 6; i++) {
+        GameCarRuntime *other = &g_Cars[i + 1];
+        other->activeFlag = 0;
+        other->speed = 0x100 + i * 0x40;
+        if (layout == 1) {
+            /* Spread across the width, so all three buckets take something. */
+            other->trackLateralOffset = (s16)(subjectOffset - 0x28 + i * 0x10);
+            other->trackProgress = subjectProgress + 0x300 + i * 0x180;
+        } else if (layout == 2) {
+            /* Everyone to one side, which is what makes the other side win. */
+            other->trackLateralOffset = (s16)(subjectOffset + 0x18 + (i & 1) * 8);
+            other->trackProgress = subjectProgress + 0x280 + i * 0x140;
+        } else {
+            /* Close enough to reach the near-miss counters and the wide ones. */
+            other->trackLateralOffset =
+                (s16)(subjectOffset + (i < 3 ? 0x45 : -0x45));
+            other->trackProgress = subjectProgress + 0x80 + i * 0x40;
+        }
+    }
+}
+
+/*
+ * One rival at a chosen distance and sideways offset, and nobody else. The
+ * sweep above fills the road; this puts a single car exactly on a threshold,
+ * which is the only way to tell one side of it from the other.
+ */
+static void RunOne(FILE *out, const char *what, s32 sceneId, s32 subjectOffset,
+                   s32 subjectSpeed, s32 rivalAhead, s32 rivalSideways,
+                   s32 playerAhead, s32 priorLimit, s32 blockerSideways,
+                   int *cases) {
+    GameCarRuntime *subject;
+    char label[192];
+    const s32 progress = 0x2000;
+
+    g_SceneId = sceneId;
+    memset(g_Cars, 0, sizeof(g_Cars[0]) * RIVAL_SLOTS);
+    { s32 i; for (i = 0; i < RIVAL_SLOTS; i++) g_Cars[i].activeFlag = -1; }
+    memset(&g_PlayerCar, 0, sizeof(g_PlayerCar));
+    g_PlayerCar.trackProgress = progress + playerAhead;
+    g_PlayerCar.trackLateralOffset = (s16)subjectOffset;
+    g_PlayerCar.speed = 0x120;
+
+    g_Cars[2].activeFlag = 0;
+    g_Cars[2].speed = 0;
+    g_Cars[2].trackProgress = progress + rivalAhead;
+    g_Cars[2].trackLateralOffset = (s16)(subjectOffset + rivalSideways);
+
+    /*
+     * The near-miss counters are only read once something has filled a
+     * bucket, and only by the branch belonging to the emptiest side, so which
+     * side the blocking car sits on decides which counter is consulted. A
+     * case that needs one has to put the blocker opposite it.
+     */
+    if (blockerSideways != NO_BLOCKER) {
+        g_Cars[3].activeFlag = 0;
+        g_Cars[3].speed = 0;
+        g_Cars[3].trackProgress = progress + 0x400;
+        g_Cars[3].trackLateralOffset = (s16)(subjectOffset + blockerSideways);
+    }
+
+    subject = &g_Cars[5];
+    subject->activeFlag = 0;
+    subject->trackProgress = progress;
+    subject->trackLateralOffset = (s16)subjectOffset;
+    subject->speed = subjectSpeed;
+    subject->accelerationLimit = (s16)priorLimit;
+    subject->aiLateralOffset = (s16)subjectOffset;
+
+    snprintf(label, sizeof(label), "%s ahead=%d sideways=%d blocker=%d", what,
+             rivalAhead, rivalSideways, (int)blockerSideways);
+    UpdateCarTrafficAvoidance(subject, 5);
+    Fold(out, label, subject);
+    (*cases)++;
+}
+
+int main(int argc, char **argv) {
+    /*
+     * What the function did before it was touched. Run with a file name to
+     * write the sweep out and diff two runs to see which cases moved.
+     */
+    static const unsigned long expected = 3400554701UL;
+    static const s32 layouts[] = {0, 1, 2, 3};
+    static const s32 subjectOffsets[] = {0, 0x60, -0x60, 0x51, -0x50};
+    static const s32 subjectSpeeds[] = {0, 0x100, 0x400};
+    static const s32 carIndices[] = {1, 3, 4, 10};
+    static const s32 sceneIds[] = {0xC, 0x3};
+    static const s16 priorActive[] = {0, 1};
+    static const s16 priorLimits[] = {0, 100};
+    FILE *out = NULL;
+    size_t l, o, v, c, s, a, m;
+    int cases = 0;
+
+    if (CheckContenderRanking() != 0 || CheckDistantRivalSlowdown() != 0 ||
+        CheckRubberBandBranches() != 0)
+        return 1;
+
+    if (argc > 1) {
+        out = fopen(argv[1], "w");
+        if (out == NULL) {
+            fprintf(stderr, "cannot write %s\n", argv[1]);
+            return 2;
+        }
+    }
+    g_TrackLength = TRACK_LENGTH;
+
+    for (l = 0; l < sizeof(layouts) / sizeof(layouts[0]); l++)
+    for (o = 0; o < sizeof(subjectOffsets) / sizeof(subjectOffsets[0]); o++)
+    for (v = 0; v < sizeof(subjectSpeeds) / sizeof(subjectSpeeds[0]); v++)
+    for (c = 0; c < sizeof(carIndices) / sizeof(carIndices[0]); c++)
+    for (s = 0; s < sizeof(sceneIds) / sizeof(sceneIds[0]); s++)
+    for (a = 0; a < sizeof(priorActive) / sizeof(priorActive[0]); a++)
+    for (m = 0; m < sizeof(priorLimits) / sizeof(priorLimits[0]); m++) {
+        GameCarRuntime *subject;
+        char label[192];
+        const s32 progress = 0x2000;
+
+        g_SceneId = sceneIds[s];
+        BuildTraffic(layouts[l], progress, subjectOffsets[o]);
+
+        subject = &g_Cars[carIndices[c]];
+        subject->activeFlag = 0;
+        subject->trackProgress = progress;
+        subject->trackLateralOffset = (s16)subjectOffsets[o];
+        subject->speed = subjectSpeeds[v];
+        subject->avoidanceActive = priorActive[a];
+        subject->accelerationLimit = priorLimits[m];
+        subject->aiLateralOffset = (s16)subjectOffsets[o];
+
+        snprintf(label, sizeof(label),
+                 "layout=%d offset=%d speed=%d index=%d scene=%d active=%d "
+                 "limit=%d",
+                 layouts[l], subjectOffsets[o], subjectSpeeds[v],
+                 carIndices[c], sceneIds[s], (int)priorActive[a],
+                 (int)priorLimits[m]);
+        UpdateCarTrafficAvoidance(subject, carIndices[c]);
+        Fold(out, label, subject);
+        cases++;
+    }
+
+    /*
+     * Thresholds, each visited from both sides. Nothing in the sweep above
+     * lands exactly on one, and a threshold nobody stands on is a threshold
+     * that can be moved without anything noticing.
+     */
+    {
+        static const s32 nearMiss[] = {0x3F, 0x40, 0x41, 0x42,
+                                       -0x3F, -0x40, -0x41, -0x42};
+        /* A stationary car looks 0xC00 ahead and contributes that minus the
+         * gap, so these gaps weigh 0x3EA, 0x3E9, 0x3E8 and 0x3E7: either side
+         * of the 0x3E9 at which acceleration starts being damped. */
+        static const s32 damping[] = {0x816, 0x817, 0x818, 0x819};
+        static const s32 nearBoundary[] = {0x1FF, 0x200, 0x201};
+        /* Counted as nearby when it is within 0x400 of the line behind. */
+        static const s32 behind[] = {0x380, 0x400, 0x401, 0x450, 0x500};
+        /* The player is looked for over a range of its own. */
+        static const s32 playerGaps[] = {0x14A0, 0x1500, 0x1560, 0x1561};
+        /* Far enough out that the sideways window wraps a signed word. */
+        static const s32 extremes[] = {32700, -32700};
+        size_t k;
+
+        for (k = 0; k < sizeof(nearMiss) / sizeof(nearMiss[0]); k++) {
+            RunOne(out, "near miss, blocked left", 3, 0, 0, 0x100, nearMiss[k],
+                   0x900, 0, -0x20, &cases);
+            RunOne(out, "near miss, blocked right", 3, 0, 0, 0x100, nearMiss[k],
+                   0x900, 0, 0x20, &cases);
+        }
+        /* The near-miss counters only look this far ahead. */
+        for (k = 0; k < sizeof(nearBoundary) / sizeof(nearBoundary[0]); k++) {
+            RunOne(out, "near limit, blocked left", 3, 0, 0, nearBoundary[k],
+                   0x45, 0x900, 0, -0x20, &cases);
+            RunOne(out, "near limit, blocked right", 3, 0, 0, nearBoundary[k],
+                   -0x45, 0x900, 0, 0x20, &cases);
+        }
+        for (k = 0; k < sizeof(damping) / sizeof(damping[0]); k++)
+            RunOne(out, "damping", 3, 0, 0, damping[k], 0, 0x900, 100, NO_BLOCKER,
+                   &cases);
+        for (k = 0; k < sizeof(behind) / sizeof(behind[0]); k++)
+            RunOne(out, "behind", 3, 0, 0, -behind[k], 0, 0x900, 0, NO_BLOCKER, &cases);
+        for (k = 0; k < sizeof(playerGaps) / sizeof(playerGaps[0]); k++)
+            RunOne(out, "player gap", 0xC, 0, 0, 0x4000, 0, playerGaps[k], 0,
+                   NO_BLOCKER, &cases);
+        for (k = 0; k < sizeof(extremes) / sizeof(extremes[0]); k++) {
+            RunOne(out, "far out", 3, extremes[k], 0, 0x100, 0x10, 0x900, 0, NO_BLOCKER,
+                   &cases);
+            RunOne(out, "far out wrapped", 3, extremes[k], 0, 0x100,
+                   -2 * extremes[k], 0x900, 0, NO_BLOCKER, &cases);
+        }
+    }
+
+    if (out != NULL) fclose(out);
+    if (s_digest != expected) {
+        printf("traffic_avoidance: %d cases folded to %lu, expected %lu\n",
+               cases, s_digest, expected);
+        return 1;
+    }
+
+    /* Invalid track state must not reach the modulo used for lap-relative
+     * gaps, and it leaves a neutral avoidance decision behind. */
+    memset(&g_Cars[0], 0, sizeof(g_Cars[0]));
+    g_Cars[0].avoidanceActive = 1;
+    g_Cars[0].avoidanceStep = 9;
+    g_Cars[0].nearbyCarCount = 4;
+    g_Cars[0].aiLateralOffset = 23;
+    g_TrackLength = 0;
+    UpdateCarTrafficAvoidance(&g_Cars[0], 0);
+    if (g_Cars[0].avoidanceActive != 0 || g_Cars[0].avoidanceStep != 0 ||
+        g_Cars[0].nearbyCarCount != 0 ||
+        g_Cars[0].avoidanceTargetOffset != 23) {
+        puts("invalid track did not reset traffic avoidance");
+        return 1;
+    }
+    g_TrackLength = TRACK_LENGTH;
+
+    memset(g_Cars, 0, sizeof(g_Cars));
+    { s32 i; for (i = 0; i < RIVAL_SLOTS; i++) g_Cars[i].activeFlag = -1; }
+    memset(&g_PlayerCar, 0, sizeof(g_PlayerCar));
+    g_SceneId = 0xC;
+    g_Cars[0].activeFlag = 0;
+    g_Cars[0].speed = INT_MAX;
+    g_Cars[0].trackLateralOffset = INT_MIN;
+    g_Cars[0].aiLateralOffset = 17;
+    g_PlayerCar.speed = INT_MAX;
+    g_PlayerCar.trackLateralOffset = INT_MAX;
+    UpdateCarTrafficAvoidance(&g_Cars[0], 0);
+    if (g_Cars[0].avoidanceActive != 0 ||
+        g_Cars[0].avoidanceTargetOffset != 17 ||
+        g_Cars[0].aiLateralOffset != 17 ||
+        g_Cars[0].nearbyCarCount != 0) {
+        puts("extreme traffic scan did not settle to a neutral decision");
+        return 1;
+    }
+
+    /* The retail counter increments through an unsigned halfword view. Keep
+     * the wrap defined when the decompiler's pointer union is removed. */
+    memset(g_Cars, 0, sizeof(g_Cars));
+    memset(&g_PlayerCar, 0, sizeof(g_PlayerCar));
+    g_RankedCars[0] = &g_Cars[0];
+    g_RankedCars[1] = &g_Cars[1];
+    g_RankedCars[2] = &g_Cars[2];
+    g_RankedCars[3] = &g_Cars[3];
+    g_CourseIndex = 0;
+    g_RacePhase = 2;
+    g_RivalCueFlags = 0x20;
+    g_RivalCueCooldowns[3] = 0x7FFF;
+    UpdateRivalRubberBand();
+    if (g_RivalCueCooldowns[3] != (s16)0x8000) {
+        printf("rival cue cooldown did not wrap: %d\n",
+               g_RivalCueCooldowns[3]);
+        return 1;
+    }
+
+    /* Each rank owns an independent cooldown. */
+    {
+        s32 rank;
+
+        for (rank = 0; rank < RIVAL_CONTENDER_COUNT; rank++) {
+            s32 i;
+
+            for (i = 0; i < 4; i++) {
+                g_Cars[i].progressA = i > rank ? -0x2000 : 0;
+                g_RivalCueCooldowns[i] = (s16)(100 + i);
+            }
+            g_RivalCueFlags = 0x1E0;
+            UpdateRivalRubberBand();
+            for (i = 0; i < 4; i++) {
+                s16 expectedCooldown =
+                    (s16)(100 + i + (i == rank ? 1 : 0));
+                if (g_RivalCueCooldowns[i] != expectedCooldown) {
+                    printf("rank %d changed cooldown %d to %d, expected %d\n",
+                           rank, i, g_RivalCueCooldowns[i], expectedCooldown);
+                    return 1;
+                }
+            }
+        }
+    }
+
+    printf("traffic_avoidance: %d cases unchanged\n", cases);
+    return 0;
+}

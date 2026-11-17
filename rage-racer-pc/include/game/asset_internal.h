@@ -1,0 +1,82 @@
+#ifndef GAME_ASSET_INTERNAL_H
+#define GAME_ASSET_INTERNAL_H
+
+#include "common.h"
+#include "game/asset.h"
+#include "game/menu_types.h"
+
+extern const TeamLogoSample *g_TeamLogoSampleData;
+extern s32 g_AssetLoadFailed;
+
+static inline s32 AssetPayloadOffsetIsValid(s32 offset,
+                                            size_t payloadOffset,
+                                            size_t size) {
+    return offset >= 0 && offset % (s32)sizeof(s32) == 0 &&
+           (size_t)offset >= payloadOffset && (size_t)offset < size;
+}
+
+/* Writable bytes remaining in the port-owned buffer containing `at`. */
+size_t PortAssetRoomAt(const void *at);
+u8 *CustomPreviewAssetBuffer(size_t *size);
+
+/* Computes a byte span without relational comparison or subtraction between
+ * C pointers that may have lost their common-array provenance in host state. */
+static inline s32 AssetSpanSize(const void *begin, const void *end,
+                                size_t *size) {
+    uintptr_t first;
+    uintptr_t last;
+
+    if (begin == NULL || end == NULL || size == NULL) {
+        return 0;
+    }
+    first = (uintptr_t)begin;
+    last = (uintptr_t)end;
+    if (last <= first || last - first > SIZE_MAX) {
+        return 0;
+    }
+    *size = (size_t)(last - first);
+    return 1;
+}
+
+static inline void FailAssetLoad(void) {
+    g_AssetLoadFailed = 1;
+    g_AssetLoadState = 0;
+}
+
+/* Keep the retail asynchronous zero result, but distinguish a permanent host
+ * failure so a state machine cannot wait on it forever. */
+static inline s32 AssetLoadDidNotComplete(s32 result) {
+    if (result < 0) {
+        FailAssetLoad();
+    }
+    return result <= 0;
+}
+
+s32 RequestAssetLoad(AssetRequestType request, s32 firstLoadState,
+                     s32 resetCdAudio);
+/* Starts a new load even when the immediately preceding request has the same
+ * type.  Use this for assets such as car models and round screens whose
+ * contents are selected by mutable game state rather than by request type. */
+s32 RestartAssetLoad(AssetRequestType request, s32 firstLoadState,
+                     s32 resetCdAudio);
+s32 IsValidModelBankAsset(const ModelBankHeader *base, size_t size);
+s32 IsValidCourseModelAsset(const CourseModelAssetHeader *base, size_t size);
+s32 IsValidTerrainCellAsset(const void *data, size_t size);
+s32 IsValidSerializedCarModelAsset(const CarModelAsset *asset, size_t size);
+s32 IsValidEnvironmentScript(const struct GameEnvironmentScript *script,
+                             size_t size);
+s32 IsValidTrackPointAsset(const struct TrackPointTable *trackData,
+                           size_t size);
+s32 IsValidTrackEventAsset(const struct TrackEventData *eventData,
+                           size_t size);
+s32 InstallSerializedCarModelSlot(CarModelAsset *asset, size_t size,
+                                  s32 index);
+s32 PublishCarModelSlot(const CarModelAsset *serializedAsset,
+                        const void *metadata, void *modelData,
+                        struct CarImageData *imageData, s32 index);
+const CarModelAsset *FindSerializedCarModelAsset(
+    const CarModelAsset *nativeAsset);
+s32 IsValidImageAsset(const GameImageAssetHeaderWord *asset, size_t size);
+s32 IsValidImageEntry(const GameImageEntryHeader *entry, size_t size);
+
+#endif

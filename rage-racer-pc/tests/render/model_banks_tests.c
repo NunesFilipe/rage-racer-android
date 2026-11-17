@@ -1,0 +1,404 @@
+#include "game/asset.h"
+#include "game/asset_internal.h"
+#include "game/car.h"
+#include "game/render.h"
+#include "game/render_internal.h"
+#include "game/track.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* This target exercises the retail model-bank layout. */
+int CarCatalogUnlockClass(int modelIndex, int grade, int fallback) {
+    (void)modelIndex;
+    (void)grade;
+    return fallback;
+}
+
+GameRenderState g_RenderState;
+NativeModelBank g_ModelBanks[GAME_MODEL_BANK_LIMIT];
+NativeCourseModel g_NativeCourseModels[GAME_COURSE_MODEL_LIMIT];
+const void *g_NativeTerrainCells[GAME_TERRAIN_CELL_LIMIT];
+s32 g_ModelBankCount;
+s32 g_CourseModelCount;
+s32 g_TerrainCellCount;
+const u16 *g_TerrainCellGrid;
+const CellVisibilityRow *g_CellVisibilityTable;
+u32 g_MainVisibleCellMask[32];
+VisibleTerrainCell g_MainVisibleCellList[64];
+u32 *g_VisibleCellMask;
+VisibleTerrainCell *g_VisibleCellList;
+s32 g_MirrorMode;
+
+static CarEntry s_cars[2];
+CarEntry *g_CarTable = s_cars;
+u8 g_CarModelBaseIndex[GAME_CAR_COUNT];
+u8 g_CarModelUnlockBase[GAME_CAR_COUNT];
+Rect g_CarImageRect;
+CarImageData *g_CarImageSlots[CAR_ASSET_SLOT_COUNT];
+CarModelAsset *g_CarModelSlots[CAR_ASSET_SLOT_COUNT];
+CarModelAsset *g_CarModelAsset;
+
+static s32 s_loadImageCalls;
+static RECT *s_loadedRect;
+static u_long *s_loadedPixels;
+
+#undef LoadImage
+int LoadImage(RECT *rect, u_long *data) {
+    s_loadedRect = rect;
+    s_loadedPixels = data;
+    s_loadImageCalls++;
+    return 0;
+}
+
+#define CHECK(condition) do { \
+    if (!(condition)) { \
+        fprintf(stderr, "%s:%d: check failed: %s\n", \
+                __FILE__, __LINE__, #condition); \
+        return 1; \
+    } \
+} while (0)
+
+static int TestModelBank(void) {
+    struct {
+        u32 modelCount;
+        s32 tableOffset;
+        s32 normalsOffset;
+        s32 modelOffsets[3];
+        u8 payload[64];
+    } data;
+    ModelBankHeader *header = (ModelBankHeader *)&data;
+
+    memset(&data, 0, sizeof(data));
+    data.modelCount = 3;
+    data.tableOffset = 32;
+    data.normalsOffset = 40;
+    data.modelOffsets[0] = 48;
+    data.modelOffsets[1] = 52;
+    data.modelOffsets[2] = 60;
+    CHECK(RegisterModelBank(header, sizeof(data), 2) == 1);
+    CHECK(g_ModelBanks[2].modelCount == 3);
+    CHECK(g_ModelBanks[2].table == (u8 *)&data + 32);
+    CHECK(g_ModelBanks[2].normals == (u8 *)&data + 40);
+    CHECK(g_ModelBanks[2].models[1] == (u8 *)&data + 52);
+
+    data.modelOffsets[2] = sizeof(data) - sizeof(u32);
+    ((u16 *)((u8 *)&data + data.modelOffsets[2]))[1] = 1;
+    CHECK(RegisterModelBank(header, sizeof(data), 2) == 0);
+    CHECK(g_ModelBanks[2].modelCount == 3);
+    ((u16 *)((u8 *)&data + data.modelOffsets[2]))[1] = 0;
+    data.modelOffsets[2] = 60;
+
+    SelectModelBank(2);
+    CHECK(g_RenderState.geometry.modelTable1 == g_ModelBanks[2].table);
+    CHECK(g_RenderState.geometry.modelNormals == g_ModelBanks[2].normals);
+    CHECK(g_RenderState.geometry.modelModels == g_ModelBanks[2].models);
+    CHECK(g_ModelBankCount == 3);
+
+    SelectModelBank(-1);
+    CHECK(g_RenderState.geometry.modelTable1 == g_ModelBanks[2].table);
+    CHECK(g_RenderState.geometry.modelNormals == g_ModelBanks[2].normals);
+    CHECK(g_RenderState.geometry.modelModels == g_ModelBanks[2].models);
+    CHECK(g_ModelBankCount == 3);
+    SelectModelBank(GAME_MODEL_BANK_LIMIT);
+    CHECK(g_RenderState.geometry.modelTable1 == g_ModelBanks[2].table);
+    CHECK(g_RenderState.geometry.modelNormals == g_ModelBanks[2].normals);
+    CHECK(g_RenderState.geometry.modelModels == g_ModelBanks[2].models);
+    CHECK(g_ModelBankCount == 3);
+
+    g_ModelBanks[0].modelCount = 77;
+    CHECK(RegisterModelBank(header, sizeof(data), -1) == 0);
+    CHECK(g_ModelBanks[0].modelCount == 77);
+    CHECK(RegisterModelBank(NULL, sizeof(data), 2) == 0);
+    CHECK(RegisterModelBank(header,
+                            offsetof(ModelBankHeader, modelOffsets), 2) == 0);
+    CHECK(g_ModelBanks[2].modelCount == 3);
+    data.modelOffsets[1] = sizeof(data);
+    CHECK(RegisterModelBank(header, sizeof(data), 2) == 0);
+    CHECK(g_ModelBanks[2].modelCount == 3);
+    data.modelOffsets[1] = 53;
+    CHECK(RegisterModelBank(header, sizeof(data), 2) == 0);
+    CHECK(g_ModelBanks[2].modelCount == 3);
+    data.modelOffsets[1] = 52;
+    data.tableOffset = offsetof(ModelBankHeader, modelOffsets);
+    CHECK(RegisterModelBank(header, sizeof(data), 2) == 0);
+    CHECK(g_ModelBanks[2].modelCount == 3);
+    data.tableOffset = 32;
+
+    {
+        size_t size = sizeof(ModelBankHeader) +
+                      GAME_MODEL_PER_BANK_LIMIT * sizeof(s32);
+        ModelBankHeader *large = calloc(1, size);
+
+        CHECK(large != NULL);
+        large->modelCount = UINT32_MAX;
+        large->modelOffsets[GAME_MODEL_PER_BANK_LIMIT - 1] = (s32)size - 1;
+        g_ModelBanks[3].modelCount = 17;
+        CHECK(RegisterModelBank(large, size, 3) == 0);
+        CHECK(g_ModelBanks[3].modelCount == 17);
+        free(large);
+    }
+    return 0;
+}
+
+static int TestCourseModels(void) {
+    struct {
+        s32 modelCount;
+        CourseModelAssetEntry models[3];
+        u8 payload[64];
+    } data;
+    CourseModelAssetHeader *header = (CourseModelAssetHeader *)&data;
+
+    memset(&data, 0, sizeof(data));
+    data.modelCount = 3;
+    data.models[0].geometryOffset = 40;
+    data.models[0].vertexCount = 12;
+    data.models[0].modelOffset = 48;
+    data.models[1].geometryOffset = 52;
+    data.models[1].vertexCount = 34;
+    data.models[1].modelOffset = 60;
+    data.models[2].geometryOffset = 64;
+    data.models[2].vertexCount = 56;
+    data.models[2].modelOffset = 72;
+    CHECK(RegisterCourseModels(header, sizeof(data)) == 1);
+    CHECK(g_CourseModelCount == 3);
+    CHECK(g_RenderState.geometry.courseBank == g_NativeCourseModels);
+    CHECK(g_NativeCourseModels[1].geometry == (u8 *)&data + 52);
+    CHECK(g_NativeCourseModels[1].vertexCount == 34);
+    CHECK(g_NativeCourseModels[1].model == (u8 *)&data + 60);
+
+    ((u16 *)((u8 *)&data + data.models[2].modelOffset))[1] = 1;
+    ((u16 *)((u8 *)&data + data.models[2].modelOffset))[2] = 56;
+    CHECK(RegisterCourseModels(header, sizeof(data)) == 0);
+    CHECK(g_CourseModelCount == 3);
+    ((u16 *)((u8 *)&data + data.models[2].modelOffset))[1] = 0;
+
+    data.models[2].modelOffset = sizeof(data) - sizeof(u32);
+    ((u16 *)((u8 *)&data + data.models[2].modelOffset))[1] = 1;
+    CHECK(RegisterCourseModels(header, sizeof(data)) == 0);
+    CHECK(g_CourseModelCount == 3);
+    ((u16 *)((u8 *)&data + data.models[2].modelOffset))[1] = 0;
+    data.models[2].modelOffset = 72;
+
+    data.models[1].modelOffset = sizeof(data);
+    CHECK(RegisterCourseModels(header, sizeof(data)) == 0);
+    CHECK(g_CourseModelCount == 3);
+    data.models[1].modelOffset = 60;
+    data.models[1].geometryOffset = 4;
+    CHECK(RegisterCourseModels(header, sizeof(data)) == 0);
+    CHECK(g_CourseModelCount == 3);
+    data.models[1].geometryOffset = 53;
+    CHECK(RegisterCourseModels(header, sizeof(data)) == 0);
+    CHECK(g_CourseModelCount == 3);
+    data.models[1].geometryOffset = 52;
+    data.models[1].vertexCount = -1;
+    CHECK(RegisterCourseModels(header, sizeof(data)) == 0);
+    CHECK(g_CourseModelCount == 3);
+    data.models[1].vertexCount = 34;
+    CHECK(RegisterCourseModels(
+              header, offsetof(CourseModelAssetHeader, models)) == 0);
+    CHECK(g_CourseModelCount == 3);
+
+    data.modelCount = -4;
+    CHECK(RegisterCourseModels(header, sizeof(data)) == 0);
+    CHECK(g_CourseModelCount == 3);
+
+    {
+        size_t size = sizeof(CourseModelAssetHeader) +
+                      GAME_COURSE_MODEL_LIMIT *
+                          sizeof(CourseModelAssetEntry);
+        CourseModelAssetHeader *large = calloc(1, size);
+
+        CHECK(large != NULL);
+        large->modelCount = GAME_COURSE_MODEL_LIMIT + 1;
+        large->models[GAME_COURSE_MODEL_LIMIT - 1].vertexCount = 99;
+        CHECK(RegisterCourseModels(large, size) == 0);
+        CHECK(g_CourseModelCount == 3);
+        free(large);
+    }
+    return 0;
+}
+
+static int TestTerrainCells(void) {
+    enum {
+        HEADER_OFFSET = TERRAIN_CELL_GRID_BYTES + CELL_VISIBILITY_TABLE_SIZE,
+        BUFFER_SIZE = HEADER_OFFSET + 64,
+    };
+    u8 data[BUFFER_SIZE];
+    TerrainCellAssetHeader *header =
+        (TerrainCellAssetHeader *)&data[HEADER_OFFSET];
+
+    memset(data, 0, sizeof(data));
+    header->cellCount = 3;
+    header->facesOffset = 32;
+    header->cellOffsets[0] = 40;
+    header->cellOffsets[1] = 44;
+    header->cellOffsets[2] = 52;
+    CHECK(InstallTerrainCellData(data, sizeof(data)) == 1);
+    CHECK(g_TerrainCellGrid == (const u16 *)data);
+    CHECK(g_CellVisibilityTable ==
+          (const CellVisibilityRow *)&data[TERRAIN_CELL_GRID_BYTES]);
+    CHECK(g_TerrainCellCount == 3);
+    CHECK(g_RenderState.geometry.cellTable == g_NativeTerrainCells);
+    CHECK(g_RenderState.geometry.cellFaces == &data[HEADER_OFFSET + 32]);
+    CHECK(g_NativeTerrainCells[2] == &data[HEADER_OFFSET + 52]);
+
+    ((u16 *)&data[HEADER_OFFSET + 52])[1] = 1;
+    CHECK(InstallTerrainCellData(data, sizeof(data)) == 0);
+    CHECK(g_TerrainCellCount == 3);
+    ((u16 *)&data[HEADER_OFFSET + 52])[1] = 0;
+
+    ((u16 *)data)[0] = 3;
+    CHECK(InstallTerrainCellData(data, sizeof(data)) == 0);
+    CHECK(g_TerrainCellCount == 3);
+    ((u16 *)data)[0] = TERRAIN_MISSING_CELL_INDEX;
+    CHECK(InstallTerrainCellData(data, sizeof(data)) == 1);
+    ((u16 *)data)[0] = 0;
+
+    header->cellOffsets[1] = 64;
+    CHECK(InstallTerrainCellData(data, sizeof(data)) == 0);
+    CHECK(g_TerrainCellCount == 3);
+    header->cellOffsets[1] = 45;
+    CHECK(InstallTerrainCellData(data, sizeof(data)) == 0);
+    CHECK(g_TerrainCellCount == 3);
+    header->cellOffsets[1] = 44;
+    header->facesOffset = 4;
+    CHECK(InstallTerrainCellData(data, sizeof(data)) == 0);
+    CHECK(g_TerrainCellCount == 3);
+    header->facesOffset = 32;
+    CHECK(InstallTerrainCellData(data, HEADER_OFFSET) == 0);
+    CHECK(g_TerrainCellCount == 3);
+
+    header->cellCount = -1;
+    CHECK(InstallTerrainCellData(data, sizeof(data)) == 0);
+    CHECK(g_TerrainCellCount == 3);
+
+    {
+        size_t size = HEADER_OFFSET + sizeof(TerrainCellAssetHeader) +
+                      GAME_TERRAIN_CELL_LIMIT * sizeof(s32);
+        u8 *large = calloc(1, size);
+        TerrainCellAssetHeader *largeHeader;
+
+        CHECK(large != NULL);
+        largeHeader = (TerrainCellAssetHeader *)&large[HEADER_OFFSET];
+        largeHeader->cellCount = TERRAIN_MISSING_CELL_INDEX + 1;
+        largeHeader->cellOffsets[GAME_TERRAIN_CELL_LIMIT - 1] = 1;
+        CHECK(InstallTerrainCellData(large, size) == 0);
+        CHECK(g_TerrainCellCount == 3);
+        free(large);
+    }
+    return 0;
+}
+
+static int TestRenderStateAndCarIndexes(void) {
+    g_MirrorMode = 7;
+    g_RenderState.pass.mode = GAME_RENDER_PASS_MIRROR;
+    InitRenderState(5);
+    CHECK(g_RenderState.pass.faceOtShift == 0xA);
+    CHECK(g_RenderState.pass.mode == GAME_RENDER_PASS_MAIN);
+    CHECK(g_RenderState.geometry.ft4Color[0] == 0x80);
+    CHECK(g_RenderState.geometry.ft4Color[3] == POLY_FT4_CODE);
+    CHECK(g_RenderState.geometry.gt4Color[0] == 0xFF);
+    CHECK(g_RenderState.geometry.gt4Color[3] == POLY_GT4_CODE);
+    CHECK(g_RenderState.draw.clipX0 == 0 && g_RenderState.draw.clipY0 == 0);
+    CHECK(g_RenderState.draw.clipX1 == SCREEN_WIDTH &&
+          g_RenderState.draw.clipY1 == SCREEN_HEIGHT);
+    CHECK(g_RenderState.pass.otShift == 5 && g_RenderState.pass.orderingFlag == 7);
+    CHECK(g_VisibleCellMask == g_MainVisibleCellMask);
+    CHECK(g_VisibleCellList == g_MainVisibleCellList);
+
+    g_CarModelBaseIndex[1] = 12;
+    g_CarModelUnlockBase[1] = 4;
+    g_CarTable[1].modelVariant = 3;
+    CHECK(GetCarAssetIndex(1, 2) == 14);
+    CHECK(GetCarUnlockLevel(1) == 7);
+    return 0;
+}
+
+static int TestCarAssetSlots(void) {
+    union {
+        max_align_t alignment;
+        u8 bytes[96];
+    } storage;
+    SerializedCarModelAssetHeader *serialized =
+        GetSerializedCarModelAssetHeader(storage.bytes);
+    CarModelAsset *view = GetCarModelAsset(storage.bytes);
+    CarModelAsset sentinelModel;
+    CarModelAsset unknownModel;
+    CarImageData image1;
+    size_t completeSize;
+
+    memset(&storage, 0, sizeof(storage));
+    memset(&unknownModel, 0, sizeof(unknownModel));
+    view->gearCount = 6;
+    view->serializedModelSize = 24;
+    serialized->modelOffset = SERIALIZED_CAR_MODEL_HEADER_SIZE;
+    serialized->imageOffset = SERIALIZED_CAR_MODEL_HEADER_SIZE + 24;
+    completeSize = (size_t)serialized->imageOffset + sizeof(CarImageData);
+    g_CarModelSlots[0] = &sentinelModel;
+    CHECK(IsValidSerializedCarModelAsset(view, completeSize) == 1);
+    CHECK(IsValidSerializedCarModelAsset(view, completeSize - 1) == 0);
+    CHECK(InstallSerializedCarModelSlot(view, completeSize, -1) == 0);
+    CHECK(g_CarModelSlots[0] == &sentinelModel);
+    CHECK(InstallSerializedCarModelSlot(view, completeSize, 1) == 1);
+    CHECK(g_CarModelSlots[1] != view);
+    CHECK(g_CarModelSlots[1]->gearCount == 6);
+    CHECK(g_CarModelSlots[1]->serializedModelSize == 24);
+    CHECK(g_CarModelSlots[1]->modelData.pointer ==
+          storage.bytes + SERIALIZED_CAR_MODEL_HEADER_SIZE);
+    CHECK(g_CarModelSlots[1]->imageData.pointer ==
+          storage.bytes + SERIALIZED_CAR_MODEL_HEADER_SIZE + 24);
+    CHECK(FindSerializedCarModelAsset(g_CarModelSlots[1]) == view);
+    CHECK(FindSerializedCarModelAsset(&unknownModel) == NULL);
+    CHECK(InstallSerializedCarModelSlot(view, completeSize, 0) == 1);
+    g_CarModelSlots[0] = NULL;
+    CHECK(FindSerializedCarModelAsset(NULL) == NULL);
+    g_CarModelSlots[0] = &sentinelModel;
+
+    CHECK(InstallSerializedCarModelSlot(NULL, completeSize, 0) == 0);
+    CHECK(InstallSerializedCarModelSlot(view, completeSize - 1, 0) == 0);
+    CHECK(g_CarModelSlots[0] == &sentinelModel);
+    serialized->modelOffset++;
+    CHECK(InstallSerializedCarModelSlot(view, completeSize, 0) == 0);
+    CHECK(g_CarModelSlots[0] == &sentinelModel);
+    serialized->modelOffset = SERIALIZED_CAR_MODEL_HEADER_SIZE;
+    serialized->imageOffset++;
+    CHECK(InstallSerializedCarModelSlot(view, completeSize, 0) == 0);
+    CHECK(g_CarModelSlots[0] == &sentinelModel);
+    serialized->imageOffset = SERIALIZED_CAR_MODEL_HEADER_SIZE + 24;
+    view->serializedModelSize = -1;
+    CHECK(InstallSerializedCarModelSlot(view, completeSize, 0) == 0);
+    CHECK(g_CarModelSlots[0] == &sentinelModel);
+
+    g_CarModelAsset = &sentinelModel;
+    SelectCarModelSlot(2);
+    CHECK(g_CarModelAsset == &sentinelModel);
+    g_CarModelSlots[0] = NULL;
+    SelectCarModelSlot(0);
+    CHECK(g_CarModelAsset == &sentinelModel);
+    SelectCarModelSlot(1);
+    CHECK(g_CarModelAsset == g_CarModelSlots[1]);
+
+    g_CarImageSlots[1] = &image1;
+    g_CarImageSlots[0] = NULL;
+    s_loadImageCalls = 0;
+    UploadCarImage(2);
+    CHECK(s_loadImageCalls == 0);
+    UploadCarImage(0);
+    CHECK(s_loadImageCalls == 0);
+    UploadCarImage(1);
+    CHECK(s_loadImageCalls == 1 && s_loadedRect == &g_CarImageRect &&
+          s_loadedPixels == (u_long *)(void *)&image1);
+    return 0;
+}
+
+int main(void) {
+    if (TestModelBank() != 0) return 1;
+    if (TestCourseModels() != 0) return 1;
+    if (TestTerrainCells() != 0) return 1;
+    if (TestRenderStateAndCarIndexes() != 0) return 1;
+    if (TestCarAssetSlots() != 0) return 1;
+    puts("model banks, render defaults and car slots retain bounded assets");
+    return 0;
+}

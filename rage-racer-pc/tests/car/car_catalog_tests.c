@@ -1,0 +1,96 @@
+#include "game/asset.h"
+#include "game/car.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static CarEntry s_cars[GAME_CAR_COUNT];
+CarEntry *g_CarTable = s_cars;
+
+/* This target checks the retail lookup tables in isolation.  The port-level
+ * catalog tests cover configured unlock-class overrides; preserve the retail
+ * fallback here without linking the port configuration subsystem. */
+int CarCatalogUnlockClass(int modelIndex, int grade, int fallback) {
+    (void)modelIndex;
+    (void)grade;
+    return fallback;
+}
+
+static const u8 expectedBaseIndex[GAME_CAR_COUNT] = {
+    0, 4, 7, 9, 14, 18, 21, 23, 26, 28, 29, 30, 31,
+};
+static const u8 expectedUnlockBase[GAME_CAR_COUNT] = {
+    1, 2, 3, 0, 1, 2, 3, 2, 3, 4, 5, 5, 5,
+};
+
+#define CHECK(condition)                                                       \
+    do {                                                                       \
+        if (!(condition)) {                                                    \
+            fprintf(stderr, "%s:%d: check failed: %s\n", __FILE__, __LINE__, \
+                    #condition);                                               \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+int main(void) {
+    s32 model;
+
+    CHECK(GetCarMaker(0) == CAR_MAKER_AGE);
+    CHECK(GetCarMaker(3) == CAR_MAKER_GNADE);
+    CHECK(GetCarMaker(4) == CAR_MAKER_LEIZARD);
+    CHECK(GetCarMaker(7) == CAR_MAKER_ASSOLUTO);
+    SetCarMaker(0, "CUSTOM");
+    CHECK(GetCarMaker(0) == CAR_MAKER_GNADE);
+    SetCarMaker(0, "AGE");
+    CHECK(GetCarMaker(0) == CAR_MAKER_AGE);
+
+    CHECK(memcmp(g_CarModelBaseIndex, expectedBaseIndex, sizeof(expectedBaseIndex)) == 0);
+    CHECK(memcmp(g_CarModelUnlockBase, expectedUnlockBase, sizeof(expectedUnlockBase)) == 0);
+
+    for (model = 0; model < 9; model++) {
+        s32 variantCount = g_CarModelBaseIndex[model + 1] -
+                           g_CarModelBaseIndex[model];
+        s32 variant;
+
+        for (variant = 0; variant < variantCount; variant++) {
+            g_CarTable[model].modelVariant = (u8)variant;
+            CHECK(GetOwnedCarAssetIndex(model) ==
+                  g_CarModelBaseIndex[model] + variant);
+            CHECK(GetCarUnlockLevel(model) ==
+                  g_CarModelUnlockBase[model] + variant);
+        }
+    }
+
+    g_CarTable[0].modelVariant = 4;
+    CHECK(GetOwnedCarAssetIndex(0) == -1);
+    g_CarTable[8].modelVariant = 0xFF;
+    CHECK(GetOwnedCarAssetIndex(8) == 28);
+
+    for (model = 9; model < GAME_CAR_COUNT; model++) {
+        g_CarTable[model].modelVariant = 0xFF;
+        CHECK(GetOwnedCarAssetIndex(model) == g_CarModelBaseIndex[model]);
+    }
+
+    CHECK(GetOwnedCarAssetIndex(-1) == -1);
+    CHECK(GetOwnedCarAssetIndex(GAME_CAR_COUNT) == -1);
+    CHECK(GetCarAssetIndex(-1, 0) == -1);
+    CHECK(GetCarAssetIndex(GAME_CAR_COUNT, 0) == -1);
+    CHECK(GetCarAssetIndex(0, -1) == -1);
+    CHECK(GetCarAssetIndex(0, CAR_MODEL_VARIANT_COUNT - 1) ==
+          CAR_MODEL_VARIANT_COUNT - 1);
+    CHECK(GetCarAssetIndex(0, CAR_MODEL_VARIANT_COUNT) == -1);
+    CHECK(GetCarAssetIndex(8, 2) == 28);
+    CHECK(GetCarAssetIndex(GAME_CAR_COUNT - 1, 0) ==
+          CAR_MODEL_VARIANT_COUNT - 1);
+    CHECK(GetCarAssetIndex(GAME_CAR_COUNT - 1, 1) == -1);
+    CHECK(GetCarUnlockLevel(-1) == -1);
+    CHECK(GetCarUnlockLevel(GAME_CAR_COUNT) == -1);
+
+    g_CarTable = NULL;
+    CHECK(GetCarUnlockLevel(0) == -1);
+    CHECK(GetOwnedCarAssetIndex(0) == -1);
+    CHECK(GetOwnedCarAssetIndex(9) == g_CarModelBaseIndex[9]);
+
+    puts("car catalog tests passed");
+    return 0;
+}

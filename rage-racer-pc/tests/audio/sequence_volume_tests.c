@@ -1,0 +1,68 @@
+#include "common.h"
+#include "game/audio.h"
+#include "game/audio_internal.h"
+#include "game/sound.h"
+
+#include <limits.h>
+#include <stdio.h>
+
+
+Audio g_Audio;
+
+static s32 s_appliedVolume;
+static s32 s_cdVolumeSetting;
+static s32 s_failures;
+static s32 s_pcmVolume;
+
+void Psyz_PcmMusicSetVolume(int volume) { s_pcmVolume = volume; }
+
+void SetCdVolumeSetting(s32 setting) { s_cdVolumeSetting = setting; }
+
+static void Check(s32 condition, const char *label) {
+    if (!condition) {
+        printf("FAIL %s\n", label);
+        s_failures++;
+    }
+}
+
+static void CheckAppliedVolume(s32 expected, const char *label) {
+    s_appliedVolume = g_Audio.seq.volume;
+    Check(s_appliedVolume == expected && s_pcmVolume == expected,
+          label);
+}
+
+int main(void) {
+    g_Audio.seq.setting = 5;
+    RefreshSequenceVolumeScale();
+    Check(g_Audio.seq.setting == 5,
+          "refresh preserves the stored sequence setting");
+    CheckAppliedVolume(38, "refresh applies volume to state and sequence");
+
+    g_Audio.seq.setting = AUDIO_SETTING_MAX + 20;
+    RefreshSequenceVolumeScale();
+    Check(g_Audio.seq.setting == AUDIO_SETTING_MAX + 20,
+          "refresh does not rewrite the stored setting");
+    CheckAppliedVolume(114, "refresh clamps an invalid stored setting");
+
+    SetSequenceVolumeSetting(7);
+    Check(g_Audio.seq.setting == 7,
+          "setter stores an intermediate sequence setting");
+    CheckAppliedVolume(53, "setter applies intermediate sequence volume");
+    Check(s_cdVolumeSetting == 7,
+          "setter applies intermediate CD volume setting");
+
+    SetSequenceVolume(-1);
+    CheckAppliedVolume(0, "direct sequence volume clamps negative input");
+    SetSequenceVolume(INT_MAX);
+    CheckAppliedVolume(0x80,
+                       "direct sequence volume clamps oversized input");
+
+    SetSequenceVolumeSetting(AUDIO_SETTING_MAX);
+    Check(g_Audio.seq.setting == AUDIO_SETTING_MAX,
+          "setter stores the maximum sequence setting");
+    CheckAppliedVolume(114, "maximum setting maps to sequence volume maximum");
+
+    if (s_failures != 0) return 1;
+    puts("sequence volume refresh and setter share the same scale");
+    return 0;
+}

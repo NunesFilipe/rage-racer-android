@@ -1,0 +1,212 @@
+#include "common.h"
+#include "game/car.h"
+#include "game/menu.h"
+
+#include <limits.h>
+#include <stdio.h>
+#include <string.h>
+
+extern s32 g_MenuHandlerIndex;
+extern s32 g_MenuOutgoingHandlerIndex;
+extern s32 g_MenuScreen;
+
+void MenuActivateScreen(s32 screen) {
+    g_MenuScreen = screen;
+    g_MenuHandlerIndex = screen;
+}
+void MenuBeginExit(s32 screen) {
+    g_MenuHandlerIndex = -1;
+    g_MenuOutgoingHandlerIndex = screen;
+}
+
+s32 GameMenuBusy;
+static CarEntry s_cars[13];
+CarEntry *g_CarTable = s_cars;
+CarEntry g_TimeAttackCars[13];
+s32 g_MenuHandlerIndex;
+s32 g_MenuOutgoingHandlerIndex;
+s32 g_MenuOverlayPattern;
+s32 g_MenuScreen;
+s32 g_MenuViewOffsetTarget;
+u16 g_PadPressed;
+u16 g_PadPressedRepeat;
+s32 g_PlayerCarIndex;
+s32 g_UiScriptProgress;
+s32 g_UiScriptProgress2;
+TimedDrawCommand g_NativePaintColorScreenScript[15];
+TimedDrawCommand g_UiChromeScript[1];
+
+static s32 s_lastCue;
+static s32 s_bodyColor1;
+static s32 s_bodyColor2;
+static PaintColor s_paint;
+
+PaintColor *MenuPaintColor(void) { return &s_paint; }
+
+s32 RunTimedDrawScript(const TimedDrawCommand *commands, s32 *progress,
+                       s32 step) {
+    (void)commands;
+    if (step < 0) {
+        *progress = 0;
+    }
+    return 1;
+}
+void PlaySoundCue(s32 cue) { s_lastCue = cue; }
+void DrawMenuCarView(void) {}
+s32 DrawPaintColorPalette(PaintColor *paint, s32 *progress, s32 step) {
+    s32 index = paint->selected;
+    (void)progress;
+    (void)step;
+    (void)index;
+    return 1;
+}
+static BrowseArrows s_browseArrows;
+BrowseArrows *MenuBrowseArrows(void) { return &s_browseArrows; }
+
+void DrawBrowseArrows(BrowseArrows *arrows, s32 step, s32 wide, s32 left, s32 right) {
+    (void)arrows;
+    (void)step;
+    (void)wide;
+    (void)left;
+    (void)right;
+}
+void DrawFadingMenuSprites(s32 progress, s32 count, s32 slot) {
+    (void)progress;
+    (void)count;
+    (void)slot;
+}
+void SetPrimaryBodyColor(s32 color) { s_bodyColor1 = color; }
+void SetSecondaryBodyColor(s32 color) { s_bodyColor2 = color; }
+
+static void Reset(void) {
+    memset(s_cars, 0, sizeof(s_cars));
+    memset(g_TimeAttackCars, 0, sizeof(g_TimeAttackCars));
+    GameMenuBusy = 0;
+    g_MenuOverlayPattern = 0;
+    g_MenuScreen = 0;
+    g_MenuViewOffsetTarget = 0;
+    g_PadPressed = 0;
+    g_PadPressedRepeat = 0;
+    s_paint.cursor = 0;
+    s_paint.selected = 0;
+    g_PlayerCarIndex = 3;
+    g_UiScriptProgress = 0;
+    g_UiScriptProgress2 = 0;
+    s_lastCue = -1;
+    s_bodyColor1 = -1;
+    s_bodyColor2 = -1;
+}
+
+#define CHECK(condition)                                                       \
+    do {                                                                       \
+        if (!(condition)) {                                                    \
+            fprintf(stderr, "check failed at line %d: %s\n", __LINE__,         \
+                    #condition);                                               \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+int main(void) {
+    Reset();
+    s_cars[3].paintColor1 = 6;
+    g_PadPressed = PAD_CONFIRM;
+    UpdatePaintColorScreen();
+    CHECK(GameMenuBusy == -1);
+    CHECK(s_paint.selected == 6);
+    CHECK(s_lastCue == 2);
+
+    Reset();
+    s_cars[3].paintColor1 = UINT8_MAX;
+    g_PadPressed = PAD_CONFIRM;
+    UpdatePaintColorScreen();
+    CHECK(GameMenuBusy == -1);
+    CHECK(s_paint.selected == MENU_PAINT_COLOR_COUNT - 1);
+
+    Reset();
+    GameMenuBusy = -1;
+    s_paint.selected = 17;
+    g_PadPressedRepeat = PAD_RIGHT;
+    UpdatePaintColorScreen();
+    CHECK(s_paint.selected == 0);
+    CHECK(s_bodyColor1 == 0);
+
+    Reset();
+    s_cars[3].paintColor1 = 2;
+    s_cars[3].paintColor2 = 4;
+    GameMenuBusy = -1;
+    s_paint.selected = 8;
+    g_PadPressed = PAD_CONFIRM;
+    UpdatePaintColorScreen();
+    CHECK(s_cars[3].paintColor1 == 8);
+    CHECK(g_TimeAttackCars[3].paintColor1 == 8);
+    CHECK(g_TimeAttackCars[3].paintColor2 == 4);
+    CHECK(GameMenuBusy == 0);
+
+    Reset();
+    s_cars[3].paintColor1 = 2;
+    GameMenuBusy = -1;
+    s_paint.selected = 8;
+    g_PadPressed = PAD_CONFIRM | PAD_CANCEL;
+    g_PadPressedRepeat = PAD_RIGHT;
+    UpdatePaintColorScreen();
+    CHECK(s_cars[3].paintColor1 == 8);
+    CHECK(s_paint.selected == 8);
+    CHECK(s_lastCue == 2);
+    CHECK(GameMenuBusy == 0);
+
+    Reset();
+    s_cars[3].paintColor2 = 11;
+    GameMenuBusy = -2;
+    s_paint.selected = 5;
+    g_PadPressed = PAD_CANCEL;
+    UpdatePaintColorScreen();
+    CHECK(s_paint.selected == 11);
+    CHECK(s_bodyColor2 == 11);
+    CHECK(GameMenuBusy == 0);
+
+    Reset();
+    s_paint.cursor = 2;
+    g_PadPressed = PAD_CONFIRM;
+    UpdatePaintColorScreen();
+    CHECK(GameMenuBusy == 1);
+    CHECK(g_MenuViewOffsetTarget == 0x3D090);
+
+    Reset();
+    GameMenuBusy = 3;
+    UpdatePaintColorScreen();
+    CHECK(g_MenuScreen == 6);
+    CHECK(GameMenuBusy == 0);
+
+    Reset();
+    s_paint.cursor = INT_MAX;
+    s_paint.selected = INT_MIN;
+    UpdatePaintColorScreen();
+    CHECK(s_paint.cursor == 2 && s_paint.selected == 0);
+
+    Reset();
+    g_CarTable = NULL;
+    g_PadPressed = PAD_CONFIRM;
+    UpdatePaintColorScreen();
+    CHECK(GameMenuBusy == 0 && s_lastCue == -1);
+
+    Reset();
+    g_PlayerCarIndex = CUSTOM_PAINT_CAR_COUNT;
+    GameMenuBusy = -1;
+    g_PadPressed = PAD_CONFIRM;
+    UpdatePaintColorScreen();
+    CHECK(GameMenuBusy == 0);
+
+    Reset();
+    g_PlayerCarIndex = CUSTOM_PAINT_CAR_COUNT;
+    g_PadPressed = PAD_CONFIRM;
+    UpdatePaintColorScreen();
+    CHECK(GameMenuBusy == 0 && s_lastCue == -1);
+
+    Reset();
+    GameMenuBusy = INT_MIN;
+    UpdatePaintColorScreen();
+    CHECK(GameMenuBusy == 0 && s_bodyColor1 == -1 && s_bodyColor2 == -1);
+
+    puts("paint color screen tests passed");
+    return 0;
+}

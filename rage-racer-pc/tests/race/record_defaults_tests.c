@@ -1,0 +1,216 @@
+#include <stdlib.h>
+#include <limits.h>
+#include <string.h>
+
+#include "common.h"
+#include "game/menu_types.h"
+#include "game/race.h"
+#include "game/records_internal.h"
+#include "game/save_internal.h"
+#include "game/screens.h"
+#include "game/state.h"
+
+#define CHECK(condition) do { if (!(condition)) abort(); } while (0)
+
+/* Verified against SLUS_004.03 offsets 0x6d954/0x6d974. Link the real
+ * initialized globals, so an accidental production-data edit fails here. */
+static const s32 expectedLapTimes[8] = {
+    100765, 146765, 145765, 35765, 97765, 135765, 128765, 35765,
+};
+static const s32 expectedTotalTimes[8] = {
+    310765, 448765, 445765, 220765, 301765, 415765, 394765, 220765,
+};
+s32 g_BestLapTimes[RECORD_SERIES_COUNT][RECORD_COURSE_COUNT]
+                      [RECORD_REFERENCE_COUNT];
+s32 g_BestTotalTimes[RECORD_SERIES_COUNT][RECORD_COURSE_COUNT]
+                        [RECORD_REFERENCE_COUNT];
+s32 g_BestSectorTimes[RECORD_SERIES_COUNT][RECORD_COURSE_COUNT]
+                         [RECORD_SECTOR_COUNT];
+RaceRecord g_RankingRecords[RECORD_SERIES_COUNT][RECORD_COURSE_COUNT]
+                           [RECORD_TABLE_LENGTH];
+RaceRecord g_TimeRecords[RECORD_SERIES_COUNT][RECORD_COURSE_COUNT]
+                        [RECORD_TABLE_LENGTH];
+
+int main(void) {
+    static const char expectedNames[5][8] = {
+        {'R', 'A', 'G', 'E', ' ', ' ', '\0', '\0'},
+        {'R', 'A', 'C', 'E', 'R', ' ', '\0', '\0'},
+        {'N', 'A', 'M', 'C', 'O', ' ', '\0', '\0'},
+        {'R', 'I', 'D', 'G', 'E', ' ', '\0', '\0'},
+        {'R', 'A', 'C', 'E', 'R', ' ', '\0', '\0'},
+    };
+    static const s16 expectedCars[5] = {0, 3, 4, 7, 3};
+    s32 series;
+    s32 course;
+    s32 slot;
+
+    CHECK(memcmp(g_DefaultLapTimes, expectedLapTimes, sizeof(expectedLapTimes)) == 0);
+    CHECK(memcmp(g_DefaultTotalTimes, expectedTotalTimes, sizeof(expectedTotalTimes)) == 0);
+
+    {
+        const s32 threeLaps[] = {91000, 89999, 90000};
+        const s32 sixLaps[] = {81000, 80000, 79000, 78000, 77000, 76000};
+        const s32 tiedLaps[] = {70000, 70000, 71000};
+        const s32 longLaps[] = {700000, 650000, 800000};
+        FastestLap fastest;
+
+        fastest = FindFastestLap(threeLaps, 3);
+        CHECK(fastest.index == 1 && fastest.time == 89999);
+        fastest = FindFastestLap(sixLaps, 6);
+        CHECK(fastest.index == 5 && fastest.time == 76000);
+        fastest = FindFastestLap(sixLaps, INT_MAX);
+        CHECK(fastest.index == 5 && fastest.time == 76000);
+        fastest = FindFastestLap(tiedLaps, 3);
+        CHECK(fastest.index == 0 && fastest.time == 70000);
+        fastest = FindFastestLap(longLaps, 3);
+        CHECK(fastest.index == 1 && fastest.time == 650000);
+        fastest = FindFastestLap(longLaps, 0);
+        CHECK(fastest.index == -1 && fastest.time == 0);
+        fastest = FindFastestLap(NULL, -1);
+        CHECK(fastest.index == -1 && fastest.time == 0);
+        fastest = FindFastestLap(NULL, 3);
+        CHECK(fastest.index == -1 && fastest.time == 0);
+    }
+
+    memset(g_RankingRecords, 0xA5, sizeof(g_RankingRecords));
+    memset(g_TimeRecords, 0xA5, sizeof(g_TimeRecords));
+    InitRecordTables();
+
+    {
+        struct {
+            char formatted[LAP_TIME_TEXT_CAPACITY];
+            char guard;
+        } output = {{0}, '!'};
+
+        FormatLapTime(output.formatted, 0);
+        CHECK(strcmp(output.formatted, "0'00\"000") == 0);
+        FormatLapTime(output.formatted, 125678);
+        CHECK(strcmp(output.formatted, "2'05\"678") == 0);
+        FormatLapTime(output.formatted, 2147483647);
+        CHECK(strcmp(output.formatted, "9'59\"999") == 0);
+        CHECK(output.guard == '!');
+        FormatLapTime(output.formatted, -1);
+        CHECK(strcmp(output.formatted, "0'00\"000") == 0);
+        FormatLapTime(NULL, 1234);
+    }
+
+    for (series = 0; series < 2; series++) {
+        for (course = 0; course < 4; course++) {
+            s32 index = series * 4 + course;
+            for (slot = 0; slot < 2; slot++) {
+                CHECK(g_BestLapTimes[series][course][slot] ==
+                      g_DefaultLapTimes[index]);
+                CHECK(g_BestTotalTimes[series][course][slot] ==
+                      g_DefaultTotalTimes[index]);
+            }
+            for (slot = 0; slot < 3; slot++) {
+                CHECK(g_BestSectorTimes[series][course][slot] ==
+                      g_DefaultLapTimes[index]);
+            }
+            for (slot = 0; slot < 5; slot++) {
+                RaceRecord *ranking = &g_RankingRecords[series][course][slot];
+                RaceRecord *time = &g_TimeRecords[series][course][slot];
+                CHECK(memcmp(ranking->driverName, expectedNames[slot], 8) == 0);
+                CHECK(memcmp(time->driverName, expectedNames[slot], 8) == 0);
+                CHECK(ranking->raceTime ==
+                      g_DefaultLapTimes[index] + slot * 2000);
+                CHECK(time->raceTime ==
+                      g_DefaultTotalTimes[index] + slot * 10000);
+                CHECK(ranking->carIndex == expectedCars[slot]);
+                CHECK(time->carIndex == expectedCars[slot]);
+            }
+        }
+    }
+
+    g_BestLapTimes[1][2][0] = 0;
+    g_BestLapTimes[1][2][1] = 12345;
+    g_BestTotalTimes[0][3][0] = -1;
+    g_BestTotalTimes[0][3][1] = 23456;
+    g_BestSectorTimes[1][1][0] = 0;
+    g_BestSectorTimes[1][1][1] = -1;
+    g_BestSectorTimes[1][1][2] = 34567;
+    RepairRecordTimes();
+    CHECK(g_BestLapTimes[1][2][0] == g_DefaultLapTimes[6]);
+    CHECK(g_BestLapTimes[1][2][1] == 12345);
+    CHECK(g_BestTotalTimes[0][3][0] == g_DefaultTotalTimes[3]);
+    CHECK(g_BestTotalTimes[0][3][1] == 23456);
+    CHECK(g_BestSectorTimes[1][1][0] == g_DefaultLapTimes[5]);
+    CHECK(g_BestSectorTimes[1][1][1] == g_DefaultLapTimes[5]);
+    CHECK(g_BestSectorTimes[1][1][2] == 34567);
+
+    /* Zeroed ranking rows (an editor-made save) come back as the retail
+     * defaults; real entries are left alone. */
+    memset(g_RankingRecords[1][2], 0, sizeof(g_RankingRecords[1][2]));
+    memset(g_TimeRecords[0][1], 0, sizeof(g_TimeRecords[0][1]));
+    g_RankingRecords[1][2][1].raceTime = 45678;
+    memcpy(g_RankingRecords[1][2][1].driverName, "ME      ", 8);
+    g_TimeRecords[0][1][4].raceTime = -5;
+    RepairRecordTimes();
+    CHECK(g_RankingRecords[1][2][0].raceTime == g_DefaultLapTimes[6]);
+    CHECK(memcmp(g_RankingRecords[1][2][0].driverName, "RAGE  ", 6) == 0);
+    CHECK(g_RankingRecords[1][2][1].raceTime == 45678);
+    CHECK(memcmp(g_RankingRecords[1][2][1].driverName, "ME      ", 8) == 0);
+    CHECK(g_RankingRecords[1][2][4].raceTime == g_DefaultLapTimes[6] + 8000);
+    CHECK(g_TimeRecords[0][1][0].raceTime == g_DefaultTotalTimes[1]);
+    CHECK(g_TimeRecords[0][1][4].raceTime == g_DefaultTotalTimes[1] + 40000);
+    CHECK(g_TimeRecords[0][1][4].carIndex == 3);
+
+    g_DefaultLapTimes[0] = INT_MAX;
+    g_DefaultTotalTimes[0] = INT_MIN;
+    InitRecordTables();
+    CHECK(g_RankingRecords[0][0][4].raceTime == RACE_TIME_MAX_MS);
+    CHECK(g_TimeRecords[0][0][4].raceTime == 0);
+    g_BestLapTimes[0][0][0] = INT_MAX;
+    g_BestTotalTimes[0][0][0] = INT_MIN;
+    g_BestSectorTimes[0][0][0] = INT_MAX;
+    RepairRecordTimes();
+    CHECK(g_BestLapTimes[0][0][0] == RACE_TIME_MAX_MS);
+    CHECK(g_BestTotalTimes[0][0][0] == 0);
+    CHECK(g_BestSectorTimes[0][0][0] == RACE_TIME_MAX_MS);
+    g_DefaultLapTimes[0] = 100765;
+    g_DefaultTotalTimes[0] = 310765;
+    InitRecordTables();
+
+    {
+        u8 nameCodes[6] = {0};
+        RaceRecord *records = g_RankingRecords[0][0];
+        RaceRecord savedRecords[RECORD_TABLE_LENGTH];
+        CHECK(InsertRaceRecord(records, 103000, 11, nameCodes) == 2);
+        CHECK(records[0].raceTime == 100765);
+        CHECK(records[1].raceTime == 102765);
+        CHECK(records[2].raceTime == 103000);
+        CHECK(records[3].raceTime == 104765);
+        CHECK(records[4].raceTime == 106765);
+        CHECK(records[2].carIndex == 11);
+        CHECK(memcmp(records[2].driverName, "AAAAAA\0\0", 8) == 0);
+        for (slot = 0; slot < 6; slot++) CHECK(nameCodes[slot] == 0xB);
+
+        memset(nameCodes, 0, sizeof(nameCodes));
+        CHECK(InsertRaceRecord(records, 100000, 12, nameCodes) == 0);
+        CHECK(records[0].raceTime == 100000 && records[0].carIndex == 12);
+        CHECK(records[1].raceTime == 100765);
+        CHECK(records[4].raceTime == 104765);
+
+        memset(nameCodes, 0, sizeof(nameCodes));
+        CHECK(InsertRaceRecord(records, 100765, 10, nameCodes) == 2);
+        CHECK(records[1].raceTime == 100765);
+        CHECK(records[2].raceTime == 100765 && records[2].carIndex == 10);
+
+        memset(nameCodes, 0x55, sizeof(nameCodes));
+        CHECK(InsertRaceRecord(records, 999999, 12, nameCodes) == 5);
+        for (slot = 0; slot < 6; slot++) CHECK(nameCodes[slot] == 0x55);
+
+        memcpy(savedRecords, records, sizeof(savedRecords));
+        CHECK(InsertRaceRecord(records, -1, 0, nameCodes) ==
+              RECORD_TABLE_LENGTH);
+        CHECK(InsertRaceRecord(records, 1, -1, nameCodes) ==
+              RECORD_TABLE_LENGTH);
+        CHECK(InsertRaceRecord(NULL, 1, 0, nameCodes) ==
+              RECORD_TABLE_LENGTH);
+        CHECK(InsertRaceRecord(records, 1, 0, NULL) ==
+              RECORD_TABLE_LENGTH);
+        CHECK(memcmp(records, savedRecords, sizeof(savedRecords)) == 0);
+    }
+
+    return 0;
+}

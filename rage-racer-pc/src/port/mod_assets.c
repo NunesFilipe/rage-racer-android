@@ -1,0 +1,379 @@
+#include <stdio.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "archive_index.h"
+#include "mod_assets.h"
+#include "render/mod_manifest.h"
+#include "texture_patch.h"
+#include "runtime_config.h"
+#include "platform_paths.h"
+#include "content/active_build.h"
+
+/*
+ * Asset overrides read from a directory, laid out the way rage-extract writes
+ * one: <directory>/raw/asset_NNN.bin, numbered by archive index.
+ *
+ * An override is free to be larger than the entry it replaces. Nothing in the
+ * loader assumes otherwise: callers advance their cursors by the size a load
+ * returns, and the port gives the asset region 64 MB where the console had two,
+ * so a pack has room to grow into. What the loader cannot survive is a load
+ * running off the end of the buffer it was handed, so that is checked here and
+ * refused rather than discovered later as corruption somewhere unrelated.
+ */
+
+static unsigned s_generation=1;
+unsigned ModAssetsGeneration(void){return s_generation;}
+static const char *s_directory;
+static char s_directoryStorage[1024];
+static RageModManifest s_manifest;
+static int s_manifestReady;
+static int s_legacyLayout;
+static int s_initialized;
+static char s_region[16],s_source[72],s_carProfile[1024];
+static struct {
+    unsigned char loaded, geometry, announced, patched, existsChecked, exists;
+} s_assets[RAGE_MOD_ASSET_ENTRY_COUNT];
+static struct {
+    unsigned char checked;
+    char name[32];
+    char length[16];
+} s_courseLabels[RAGE_EXTRA_TRACK_SLOT_COUNT];
+void ModAssetSetGeometryChanged(unsigned index,int changed){if(index<RAGE_MOD_ASSET_ENTRY_COUNT)s_assets[index].geometry=(unsigned char)(changed!=0);}
+int ModAssetGeometryChanged(unsigned index){return index<RAGE_MOD_ASSET_ENTRY_COUNT&&s_assets[index].geometry;}
+int ModAssetWasReplaced(unsigned index){return index<RAGE_MOD_ASSET_ENTRY_COUNT&&s_assets[index].loaded;}
+
+void ModAssetsShutdown(void) {
+    s_generation++;
+    s_directory = NULL;
+    memset(s_directoryStorage, 0, sizeof(s_directoryStorage));
+    memset(&s_manifest, 0, sizeof(s_manifest));
+    memset(s_assets, 0, sizeof(s_assets));
+    memset(s_courseLabels, 0, sizeof(s_courseLabels));
+    s_manifestReady = 0;
+    s_legacyLayout = 0;
+    s_initialized = 0;
+    /* Disc identity survives asset reload; installed views and profile paths
+     * do not. A new disc supplies a new identity before the next session. */
+    s_carProfile[0]='\0';
+}
+
+int ModAssetsNeedsSource(void) {
+    char root[1024],path[1100];const char *configured=RuntimeConfigGet("mods.directory");FILE *file;
+    if(configured&&!*configured)return 0;
+    if(configured){if(strlen(configured)>=sizeof(root))return 0;strcpy(root,configured);}
+    else if(!PlatformUserConfigPath("mods",root,sizeof(root)))return 0;
+    if(snprintf(path,sizeof(path),"%s/active.json",root)<0)return 0;
+    file=fopen(path,"rb");if(!file)return 0;fclose(file);return 1;
+}
+void ModAssetsSetSource(const char *region,const char *fingerprint) {
+    if(s_initialized||!region||!fingerprint||strlen(region)>=sizeof(s_region)||strlen(fingerprint)>=sizeof(s_source))return;
+    strcpy(s_region,region);strcpy(s_source,fingerprint);
+}
+
+/* Missing manifests retain legacy-only compatibility. Any other read/parse
+ * failure disables the entire directory, before either provider can use it. */
+static int ModAssetsReadManifest(void) {
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/mod.toml", s_directory);
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        if (errno == ENOENT) return 1;
+        fprintf(stderr, "rage-port: cannot open mod manifest %s; mod disabled\n", path);
+        return 0;
+    }
+    long size = -1;
+    if (fseek(file, 0, SEEK_END) == 0) size = ftell(file);
+    /* More than the maximum meaningful content in the bounded schema. */
+    if (size < 0 || size > 2 * 1024 * 1024 || fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        fprintf(stderr, "rage-port: invalid mod manifest size %s; mod disabled\n", path);
+        return 0;
+    }
+    char *bytes = malloc((size_t)size + 1);
+    if (bytes == NULL) {
+        fclose(file);
+        fprintf(stderr, "rage-port: cannot allocate mod manifest %s; mod disabled\n", path);
+        return 0;
+    }
+    size_t readSize = fread(bytes, 1, (size_t)size, file);
+    int readFailed = ferror(file);
+    int closeFailed = fclose(file) != 0;
+    if (readSize != (size_t)size || readFailed || closeFailed) {
+        free(bytes);
+        fprintf(stderr, "rage-port: cannot read mod manifest %s; mod disabled\n", path);
+        return 0;
+    }
+    int valid = ModManifestParse(bytes, (size_t)size, &s_manifest);
+    free(bytes);
+    if (!valid) {
+        fprintf(stderr, "rage-port: mod manifest %s:%zu: %s; mod disabled\n",
+                path, s_manifest.errorLine, ModManifestErrorString(s_manifest.error));
+        return 0;
+    }
+    const RageModManifest *selected[] = {&s_manifest};
+    RageModOrder order;
+    if (!ModManifestBuildOrder(selected, 1, &order)) {
+        fprintf(stderr, "rage-port: mod %s: %s (%s); mod disabled\n",
+                s_manifest.id[0] ? s_manifest.id : "(unnamed)",
+                ModManifestOrderErrorString(order.error),
+                order.requirementIndex < s_manifest.requirementCount
+                    ? s_manifest.requirements[order.requirementIndex] : "selection");
+        return 0;
+    }
+    s_manifestReady = 1;
+    return 1;
+}
+
+static void ModAssetsInit(void) {
+    char probe[1024];
+    FILE *test;
+    int written;
+
+    if (s_initialized) return;
+    s_initialized = 1;
+    s_directory = RuntimeConfigGet("mods.directory");
+    /* An explicit empty path disables mods. Otherwise a normal game launch
+     * discovers the editor's published user mod without an INI change. */
+    if (s_directory != NULL && s_directory[0] == '\0') return;
+    if (s_directory == NULL) {
+        if (!PlatformUserConfigPath("mods", s_directoryStorage,
+                                    sizeof(s_directoryStorage))) return;
+        written = snprintf(probe, sizeof(probe), "%s/mod.toml", s_directoryStorage);
+        if (written < 0 || (size_t)written >= sizeof(probe)) return;
+        test = fopen(probe, "rb");
+        if (test == NULL && errno == ENOENT && !ModAssetsNeedsSource()) return;
+        if (test != NULL) fclose(test);
+        s_directory = s_directoryStorage;
+    }
+    if (strlen(s_directory) >= sizeof(s_directoryStorage)) {
+        fprintf(stderr, "rage-port: mods.directory path is too long\n");
+        s_directory = NULL;
+        return;
+    }
+    if (s_directory != s_directoryStorage) strcpy(s_directoryStorage, s_directory);
+    s_directory = s_directoryStorage;
+    {
+        ActiveBuild build;char error[160];
+        int result=ActiveBuildOpen(s_directory,s_region,s_source,&build,error,sizeof(error));
+        if(result<0){fprintf(stderr,"rage-port: %s; active project disabled\n",error);s_directory=NULL;return;}
+        if(result>0){strcpy(s_directoryStorage,build.directory);strcpy(s_carProfile,build.profile);}
+    }
+    if (!ModAssetsReadManifest()) {
+        s_directory = NULL;
+        s_carProfile[0]='\0';
+        return;
+    }
+    /* Legacy texture patches need an extracted atlas layout. A validated
+     * manifest independently enables raw providers in ModOpen below. */
+    written = snprintf(probe, sizeof(probe), "%s/raw/asset_000.bin",
+                       s_directory);
+    if (written < 0 || (size_t)written >= sizeof(probe)) {
+        fprintf(stderr, "rage-port: mods.directory path is too long\n");
+        s_directory = NULL;
+        return;
+    }
+    test = fopen(probe, "rb");
+    if (test == NULL) {
+        fprintf(stderr,
+                "rage-port: mods.directory %s has no raw/asset_000.bin; legacy texture patches are disabled\n",
+                s_directory);
+        return;
+    }
+    fclose(test);
+    s_legacyLayout = 1;
+    fprintf(stderr, "rage-port: asset overrides from %s\n", s_directory);
+}
+
+const char *ModAssetsDirectory(void) {
+    ModAssetsInit();
+    return s_directory;
+}
+const char *ModAssetsCarProfile(void) {
+    ModAssetsInit();return s_directory&&s_carProfile[0]?s_carProfile:NULL;
+}
+
+const RageModManifest *ModAssetsManifest(void) {
+    ModAssetsInit();
+    return s_directory != NULL && s_manifestReady ? &s_manifest : NULL;
+}
+
+static FILE *ModOpen(int index, long *size) {
+    char path[1024];
+    FILE *file;
+    int written;
+
+    if (s_directory == NULL || (!s_legacyLayout && !s_manifestReady) ||
+        (unsigned)index >= RAGE_MOD_ASSET_ENTRY_COUNT || size == NULL) {
+        return NULL;
+    }
+    written = snprintf(path, sizeof(path), "%s/raw/asset_%03d.bin",
+                       s_directory, index);
+    if (written < 0 || (size_t)written >= sizeof(path)) return NULL;
+    file = fopen(path, "rb");
+    if (file == NULL) return NULL;
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    *size = ftell(file);
+    if (*size <= 0 || fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    return file;
+}
+
+int ModAssetExists(int index) {
+    long size = 0;
+    FILE *file;
+
+    if ((unsigned)index >= RAGE_MOD_ASSET_ENTRY_COUNT) return 0;
+    ModAssetsInit();
+    if (s_assets[index].existsChecked) return s_assets[index].exists;
+    s_assets[index].existsChecked = 1;
+    file = ModOpen(index, &size);
+    if (file == NULL) {
+        s_assets[index].exists = 0;
+        return 0;
+    }
+    fclose(file);
+    s_assets[index].exists = (unsigned char)(size > 0 && (size & 3) == 0);
+    return s_assets[index].exists;
+}
+
+static void TrimTrailingNewline(char *line) {
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+        line[--len] = '\0';
+    }
+}
+
+void ModAssetCourseLabel(int extraCourseIndex, char *nameOut,
+                         size_t nameCapacity, char *lengthOut,
+                         size_t lengthCapacity) {
+    if ((unsigned)extraCourseIndex >= RAGE_EXTRA_TRACK_SLOT_COUNT) {
+        if (nameOut && nameCapacity) nameOut[0] = '\0';
+        if (lengthOut && lengthCapacity) lengthOut[0] = '\0';
+        return;
+    }
+    ModAssetsInit();
+    if (!s_courseLabels[extraCourseIndex].checked) {
+        char path[1024];
+        FILE *file = NULL;
+        s_courseLabels[extraCourseIndex].checked = 1;
+        snprintf(s_courseLabels[extraCourseIndex].name,
+                 sizeof(s_courseLabels[extraCourseIndex].name),
+                 "CUSTOM %d", extraCourseIndex + 1);
+        snprintf(s_courseLabels[extraCourseIndex].length,
+                 sizeof(s_courseLabels[extraCourseIndex].length),
+                 "CUSTOM");
+        if (s_directory != NULL && (s_legacyLayout || s_manifestReady)) {
+            int written = snprintf(path, sizeof(path),
+                                   "%s/raw/course_%02d.txt",
+                                   s_directory, extraCourseIndex + 1);
+            if (written > 0 && (size_t)written < sizeof(path)) {
+                file = fopen(path, "rb");
+            }
+        }
+        if (file != NULL) {
+            char line[64];
+            if (fgets(line, sizeof(line), file) != NULL) {
+                TrimTrailingNewline(line);
+                if (line[0] != '\0') {
+                    snprintf(s_courseLabels[extraCourseIndex].name,
+                             sizeof(s_courseLabels[extraCourseIndex].name),
+                             "%.*s",
+                             (int)sizeof(s_courseLabels[extraCourseIndex].name) - 1,
+                             line);
+                }
+            }
+            if (fgets(line, sizeof(line), file) != NULL) {
+                TrimTrailingNewline(line);
+                if (line[0] != '\0') {
+                    snprintf(s_courseLabels[extraCourseIndex].length,
+                             sizeof(s_courseLabels[extraCourseIndex].length),
+                             "%.*s",
+                             (int)sizeof(s_courseLabels[extraCourseIndex].length) - 1,
+                             line);
+                }
+            }
+            fclose(file);
+        }
+    }
+    if (nameOut && nameCapacity) {
+        snprintf(nameOut, nameCapacity, "%s",
+                 s_courseLabels[extraCourseIndex].name);
+    }
+    if (lengthOut && lengthCapacity) {
+        snprintf(lengthOut, lengthCapacity, "%s",
+                 s_courseLabels[extraCourseIndex].length);
+    }
+}
+
+int ModAssetLoad(int index, void *destination, unsigned int originalSize) {
+    long size;
+    FILE *file;
+    unsigned char *replacement;
+    size_t room;
+    size_t loaded;
+    int closeFailed;
+
+    if (destination == NULL ||
+        (unsigned)index >= RAGE_MOD_ASSET_ENTRY_COUNT) return 0;
+    ModAssetsInit();
+    s_assets[index].loaded=0;s_assets[index].geometry=0;
+    file = ModOpen(index, &size);
+    if (file == NULL) return 0;
+
+    room = PortAssetRoomAt(destination);
+    if (room == 0 || (size_t)size > room || size > INT_MAX || (size & 3) != 0) {
+        fclose(file);
+        fprintf(stderr,
+                "rage-port: override for asset %d has invalid size %ld with %zu available; using the original\n",
+                index, size, room);
+        return 0;
+    }
+
+    replacement = malloc((size_t)size);
+    if (replacement == NULL) {
+        fclose(file);
+        return 0;
+    }
+    loaded = fread(replacement, 1, (size_t)size, file);
+    closeFailed = fclose(file) != 0;
+    if (loaded != (size_t)size || closeFailed) {
+        free(replacement);
+        fprintf(stderr,
+                "rage-port: override for asset %d could not be read\n",
+                index);
+        return 0;
+    }
+    memcpy(destination, replacement, (size_t)size);
+    s_assets[index].loaded=1;s_assets[index].geometry=1;
+    free(replacement);
+    if ((unsigned int)size != originalSize) {
+        if (!s_assets[index].announced) {
+            s_assets[index].announced = 1;
+            fprintf(stderr, "rage-port: asset %d overridden, %u -> %ld bytes\n",
+                    index, originalSize, size);
+        }
+    }
+    return (int)size;
+}
+
+/* Apply the mod directory's edited images to an asset already in memory. */
+void ModPatchTextures(int index, void *data, size_t size) {
+    int patched;
+    if ((unsigned)index >= RAGE_ARCHIVE_INDEX_ENTRY_COUNT) return;
+    ModAssetsInit();
+    if (s_directory == NULL || !s_legacyLayout) return;
+    patched = TexturePatchAsset(s_directory, index, data, size);
+    if (patched > 0 && !s_assets[index].patched) {
+        s_assets[index].patched = 1;
+        fprintf(stderr, "rage-port: asset %d patched from %d texture images\n",
+                index, patched);
+    }
+}

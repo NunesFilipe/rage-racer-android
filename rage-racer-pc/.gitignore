@@ -1,0 +1,99 @@
+.venv/
+build/
+build-*/
+disc/**
+!disc/.gitkeep
+!disc/PAL/
+!disc/PAL/.gitkeep
+!disc/USA/
+!disc/USA/.gitkeep
+disc/*.bin
+disc/*.cue
+disc/*.7z
+disc/*.xml
+assets/**/*.exe
+assets/**/SYSTEM.CNF
+*.pyc
+__pycache__/
+.DS_Store
+.idea/
+.vscode/
+*.o
+*.a
+*.elf
+*.map
+*.mcd
+
+# Native PsyZ memory-card directories.
+bu00/
+bu10/
+
+# Generated split output.
+asm/**
+!asm/
+# Local reverse-engineering scratch/output.
+scratch/
+proposals/
+build/extracted-assets/
+prompts/
+tmp/
+nonmatchings/
+reference/
+local/
+expected/
+extracted/
+extracted_assets/
+
+# Local toolchains and external helper clones. The build may populate
+# build/toolchain/, but source releases must not publish these.
+/sdk/
+tools/asm-differ
+tools/decomp-permuter/
+tools/m2c/
+tools/maspsx/
+tools/maspsx_*/
+tools/wibo/
+tools/mkpsxiso-bin/
+tools/psyq-gcc-*/
+tools/psx-ruby/
+local.mk
+
+# Retail game data is required locally but cannot be distributed with the
+# source port.
+assets/*/RAGE.BIN
+assets/*/fmv/*
+!assets/*/fmv/.gitkeep
+# Optional authored replacement cars are distributed separately from source.
+assets/cars
+
+# Generated reports.
+tools/asm_report.html
+tools/asset_map.html
+tools/source_browser.html
+build/**/report.json
+
+# Internal agent briefs, their reports, and the decompilation guide: kept
+# locally, not published. These describe how a particular session was run and
+# mean nothing to someone cloning the repository.
+docs/TASK_FOR_*.md
+docs/*_REPORT.md
+docs/*_REPORT_*.md
+# Per-function agent notes.
+docs/func_*.md
+docs/DECOMPILATION_GUIDE.md
+
+# Debug dump written by decomp-permuter when a compile fails.
+debug_source.c
+
+# Compiler dumps (cc1 -dl/-dg) and cpp -MD dependency files. cc.sh feeds the
+# source on stdin, so cc1 names its dumps after "-".
+*.lreg
+*.greg
+*.d
+-.*
+
+# Local emulator/native visual checkpoints and replay artifacts. Durable
+# conclusions and reproduction commands belong in issue or pull-request notes.
+.visual-cache/
+rage-port.cfg
+markers/

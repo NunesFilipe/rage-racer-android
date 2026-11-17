@@ -1,0 +1,2064 @@
+add_executable(native_asset_fixture native_asset_fixture.c)
+add_executable(car_lights_tests car_lights_tests.c)
+target_link_libraries(car_lights_tests PRIVATE rage-render-world)
+target_compile_options(car_lights_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME car_lights COMMAND car_lights_tests)
+set_tests_properties(car_lights PROPERTIES LABELS unit)
+target_link_libraries(native_asset_fixture PRIVATE SDL3::SDL3)
+target_compile_options(native_asset_fixture PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+
+add_executable(ray_bvh_tests ray_bvh_tests.c)
+target_link_libraries(ray_bvh_tests PRIVATE rage-ray)
+target_compile_options(ray_bvh_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME ray_bvh COMMAND ray_bvh_tests)
+set_tests_properties(ray_bvh PROPERTIES LABELS unit)
+
+add_executable(ray_mesh_import_tests ray_mesh_import_tests.c)
+target_link_libraries(ray_mesh_import_tests PRIVATE rage-ray)
+target_compile_options(ray_mesh_import_tests PRIVATE
+    ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME ray_mesh_import COMMAND ray_mesh_import_tests)
+set_tests_properties(ray_mesh_import PROPERTIES LABELS unit)
+
+add_executable(ray_scene_tests ray_scene_tests.c)
+target_link_libraries(ray_scene_tests PRIVATE rage-ray)
+target_compile_options(ray_scene_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME ray_scene COMMAND ray_scene_tests)
+set_tests_properties(ray_scene PROPERTIES LABELS unit)
+
+add_executable(ray_world_tests ray_world_tests.c)
+target_link_libraries(ray_world_tests PRIVATE rage-ray)
+target_compile_options(ray_world_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME ray_world COMMAND ray_world_tests)
+set_tests_properties(ray_world PROPERTIES LABELS unit)
+
+add_executable(ray_gpu_tests ray_gpu_tests.c)
+target_link_libraries(ray_gpu_tests PRIVATE rage-ray)
+target_compile_options(ray_gpu_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME ray_gpu COMMAND ray_gpu_tests)
+set_tests_properties(ray_gpu PROPERTIES LABELS unit)
+
+add_executable(ray_draws_tests ray_draws_tests.c)
+target_link_libraries(ray_draws_tests PRIVATE rage-ray)
+target_compile_options(ray_draws_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME ray_draws COMMAND ray_draws_tests)
+set_tests_properties(ray_draws PROPERTIES LABELS unit)
+
+add_executable(render_world_scene_tests render_world_scene_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/render_world_scene.c)
+target_include_directories(render_world_scene_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_options(render_world_scene_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME render_world_scene COMMAND render_world_scene_tests)
+set_tests_properties(render_world_scene PROPERTIES LABELS unit)
+
+if(TARGET rage-racer-smoke)
+    add_test(NAME attract_geometry COMMAND ${CMAKE_COMMAND}
+        -DGAME=$<TARGET_FILE:rage-racer-smoke> -DSOURCE=${PROJECT_SOURCE_DIR}
+        -DOUTPUT=${CMAKE_BINARY_DIR}/attract-geometry
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_attract_geometry.cmake)
+    set_tests_properties(attract_geometry PROPERTIES LABELS "e2e;gpu"
+        TIMEOUT 310 SKIP_REGULAR_EXPRESSION "SKIP: provide DISC")
+    add_executable(mirror_image_check mirror_image_check.c)
+    add_executable(mirror_image_check_tests mirror_image_check_tests.c)
+    target_compile_options(mirror_image_check_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+    add_test(NAME mirror_image_check COMMAND mirror_image_check_tests)
+    set_tests_properties(mirror_image_check PROPERTIES LABELS unit)
+    target_compile_options(mirror_image_check PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+    add_test(NAME mirror_cars COMMAND ${CMAKE_COMMAND}
+        -DFIXTURE=$<TARGET_FILE:native_asset_fixture> -DGAME=$<TARGET_FILE:rage-racer-smoke>
+        -DCHECK=$<TARGET_FILE:mirror_image_check> -DSOURCE=${PROJECT_SOURCE_DIR}
+        -DOUTPUT_ROOT=${CMAKE_BINARY_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_mirror_cars.cmake)
+    set_tests_properties(mirror_cars PROPERTIES LABELS e2e TIMEOUT 360)
+    add_test(NAME renderer_toggle_cycles COMMAND ${CMAKE_COMMAND}
+        -DFIXTURE=$<TARGET_FILE:native_asset_fixture> -DGAME=$<TARGET_FILE:rage-racer-smoke>
+        -DSOURCE=${PROJECT_SOURCE_DIR} -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_renderer_toggle_cycles.cmake)
+    set_tests_properties(renderer_toggle_cycles PROPERTIES LABELS e2e TIMEOUT 195)
+    add_test(NAME native_render_world COMMAND ${CMAKE_COMMAND}
+        -DFIXTURE=$<TARGET_FILE:native_asset_fixture> -DGAME=$<TARGET_FILE:rage-racer-smoke>
+        -DSOURCE=${PROJECT_SOURCE_DIR} -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_native_render_world.cmake)
+    set_tests_properties(native_render_world PROPERTIES LABELS e2e TIMEOUT 400 RUN_SERIAL TRUE)
+endif()
+if(TARGET rage-frame-replay)
+    add_executable(rage-stage-image-check ${PROJECT_SOURCE_DIR}/tools/rage_stage_image_check.c)
+    add_executable(stage_image_check_tests stage_image_check_tests.c)
+    foreach(target rage-stage-image-check stage_image_check_tests)
+        target_compile_options(${target} PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+    endforeach()
+    add_test(NAME stage_image_check COMMAND stage_image_check_tests)
+    set_tests_properties(stage_image_check PROPERTIES LABELS unit)
+    add_test(NAME render_stage_angles COMMAND ${CMAKE_COMMAND}
+        -DTOOL=$<TARGET_FILE:rage-render-stage> -DCHECK=$<TARGET_FILE:rage-stage-image-check>
+        -DSOURCE=${PROJECT_SOURCE_DIR} -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_stage_angles.cmake)
+    set_tests_properties(render_stage_angles PROPERTIES LABELS functional
+        TIMEOUT 900 SKIP_REGULAR_EXPRESSION "SKIP: no imported assets")
+    add_executable(environment_fixture environment_fixture.c)
+    target_link_libraries(environment_fixture PRIVATE rage-render-world)
+    if(MSVC)
+        target_compile_options(environment_fixture PRIVATE /W4 /WX)
+        target_compile_definitions(environment_fixture PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(environment_fixture PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+    endif()
+    add_test(NAME environment_provider COMMAND ${CMAKE_COMMAND}
+        -DREPLAY=$<TARGET_FILE:rage-frame-replay>
+        -DFIXTURE=$<TARGET_FILE:environment_fixture>
+        -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_environment_index.cmake)
+    set_tests_properties(environment_provider PROPERTIES LABELS gpu TIMEOUT 240
+        SKIP_REGULAR_EXPRESSION "SKIP: environment provider requires")
+endif()
+
+if(TARGET rage-racer-smoke AND UNIX AND NOT APPLE)
+    add_test(NAME modern_submit_recovery COMMAND ${CMAKE_COMMAND}
+        -DGAME=$<TARGET_FILE:rage-racer-smoke> -DSOURCE=${CMAKE_SOURCE_DIR}
+        -DOUTPUT_ROOT=${CMAKE_BINARY_DIR} -DHISTORY=true -DFPS=logic -DFAIL_SUBMIT_FRAME=300
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_sampled_vram_marker.cmake)
+    set_tests_properties(modern_submit_recovery PROPERTIES LABELS e2e TIMEOUT 180
+        SKIP_REGULAR_EXPRESSION "SKIP: no disc")
+    add_test(NAME retained_texture_history COMMAND ${CMAKE_COMMAND}
+        -DGAME=$<TARGET_FILE:rage-racer-smoke> -DSOURCE=${CMAKE_SOURCE_DIR}
+        -DOUTPUT_ROOT=${CMAKE_BINARY_DIR} -DHISTORY=true
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_sampled_vram_marker.cmake)
+    set_tests_properties(retained_texture_history PROPERTIES LABELS e2e TIMEOUT 180
+        SKIP_REGULAR_EXPRESSION "SKIP: no disc")
+    add_test(NAME sampled_vram_marker COMMAND ${CMAKE_COMMAND}
+        -DGAME=$<TARGET_FILE:rage-racer-smoke> -DSOURCE=${CMAKE_SOURCE_DIR}
+        -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_sampled_vram_marker.cmake)
+    set_tests_properties(sampled_vram_marker PROPERTIES LABELS e2e TIMEOUT 135
+        SKIP_REGULAR_EXPRESSION "SKIP: no disc")
+    foreach(fps logic 60)
+        add_test(NAME sampled_vram_marker_${fps} COMMAND ${CMAKE_COMMAND}
+            -DGAME=$<TARGET_FILE:rage-racer-smoke> -DSOURCE=${CMAKE_SOURCE_DIR}
+            -DOUTPUT_ROOT=${CMAKE_BINARY_DIR} -DFPS=${fps}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_sampled_vram_marker.cmake)
+        set_tests_properties(sampled_vram_marker_${fps} PROPERTIES LABELS e2e TIMEOUT 135
+            SKIP_REGULAR_EXPRESSION "SKIP: no disc")
+    endforeach()
+endif()
+
+add_executable(sky_texture_identity_tests sky_texture_identity_tests.c)
+target_include_directories(sky_texture_identity_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(MSVC)
+    target_compile_options(sky_texture_identity_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(sky_texture_identity_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME sky_texture_identity COMMAND sky_texture_identity_tests)
+set_tests_properties(sky_texture_identity PROPERTIES LABELS unit)
+
+add_executable(presentation_device_tests presentation_device_tests.c)
+target_link_libraries(presentation_device_tests PRIVATE psyz SDL3::SDL3)
+if(MSVC)
+    target_compile_options(presentation_device_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(presentation_device_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME presentation_device COMMAND presentation_device_tests)
+set_tests_properties(presentation_device PROPERTIES LABELS gpu SKIP_RETURN_CODE 77 TIMEOUT 30)
+
+add_executable(track_texture_snapshot_tests track_texture_snapshot_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/track_texture_snapshot.c)
+target_include_directories(track_texture_snapshot_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(MSVC)
+    target_compile_options(track_texture_snapshot_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(track_texture_snapshot_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME track_texture_snapshot COMMAND track_texture_snapshot_tests)
+set_tests_properties(track_texture_snapshot PROPERTIES LABELS unit)
+
+add_executable(composite_gpu_tests composite_gpu_tests.c)
+target_include_directories(composite_gpu_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/modern/shaders)
+target_link_libraries(composite_gpu_tests PRIVATE SDL3::SDL3)
+if(NOT MSVC)
+    target_link_libraries(composite_gpu_tests PRIVATE m)
+    target_compile_options(composite_gpu_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME composite_gpu COMMAND composite_gpu_tests)
+set_tests_properties(composite_gpu PROPERTIES LABELS gpu SKIP_RETURN_CODE 77 TIMEOUT 30)
+
+add_executable(native_fog_gpu_tests native_fog_gpu_tests.c)
+target_include_directories(native_fog_gpu_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/port/modern/shaders")
+target_link_libraries(native_fog_gpu_tests PRIVATE SDL3::SDL3 rage-render-world)
+target_compile_options(native_fog_gpu_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME native_fog_gpu COMMAND native_fog_gpu_tests)
+add_test(NAME native_depth_bias_gpu COMMAND native_fog_gpu_tests --depth)
+set_tests_properties(native_depth_bias_gpu PROPERTIES LABELS gpu SKIP_RETURN_CODE 77 TIMEOUT 30)
+set_tests_properties(native_fog_gpu PROPERTIES LABELS gpu SKIP_RETURN_CODE 77 TIMEOUT 30)
+add_test(NAME native_shadow_uv_gpu COMMAND native_fog_gpu_tests --shadow)
+set_tests_properties(native_shadow_uv_gpu PROPERTIES LABELS gpu SKIP_RETURN_CODE 77 TIMEOUT 30)
+add_executable(native_shadow_mask_tests native_shadow_mask_tests.c)
+target_include_directories(native_shadow_mask_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/port/modern/shaders")
+target_link_libraries(native_shadow_mask_tests PRIVATE SDL3::SDL3 rage-render-world)
+target_compile_options(native_shadow_mask_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME native_shadow_mask_gpu COMMAND native_shadow_mask_tests)
+set_tests_properties(native_shadow_mask_gpu PROPERTIES LABELS gpu SKIP_RETURN_CODE 77 TIMEOUT 30)
+
+add_executable(vram_read_cache_tests vram_read_cache_tests.c)
+target_include_directories(vram_read_cache_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/src/platform)
+if(NOT MSVC)
+    target_compile_options(vram_read_cache_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME vram_read_cache COMMAND vram_read_cache_tests)
+set_tests_properties(vram_read_cache PROPERTIES LABELS unit)
+
+add_executable(triangle_coverage_tests triangle_coverage_tests.c)
+target_include_directories(triangle_coverage_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/src/platform)
+if(NOT MSVC)
+    target_compile_options(triangle_coverage_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME triangle_coverage COMMAND triangle_coverage_tests)
+set_tests_properties(triangle_coverage PROPERTIES LABELS unit)
+
+add_executable(texture_triangle_tests texture_triangle_tests.c)
+target_include_directories(texture_triangle_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/src/platform)
+if(NOT MSVC)
+    target_link_libraries(texture_triangle_tests PRIVATE m)
+    target_compile_options(texture_triangle_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME texture_triangle COMMAND texture_triangle_tests)
+set_tests_properties(texture_triangle PROPERTIES LABELS unit)
+
+add_executable(texture_span_tests texture_span_tests.c)
+target_include_directories(texture_span_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/src/platform)
+if(NOT MSVC)
+    target_link_libraries(texture_span_tests PRIVATE m)
+    target_compile_options(texture_span_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME texture_span COMMAND texture_span_tests)
+set_tests_properties(texture_span PROPERTIES LABELS unit)
+
+add_executable(texture_sample_tests texture_sample_tests.c)
+target_include_directories(texture_sample_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/src/platform)
+if(NOT MSVC)
+    target_link_libraries(texture_sample_tests PRIVATE m)
+    target_compile_options(texture_sample_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME texture_sample COMMAND texture_sample_tests)
+set_tests_properties(texture_sample PROPERTIES LABELS unit)
+
+add_executable(modern_vram_snapshot_tests
+    modern_vram_snapshot_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_vram_snapshot.c)
+target_include_directories(modern_vram_snapshot_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+target_link_libraries(modern_vram_snapshot_tests PRIVATE SDL3::SDL3)
+if(MSVC)
+    target_compile_options(modern_vram_snapshot_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(modern_vram_snapshot_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME modern_vram_snapshot COMMAND modern_vram_snapshot_tests)
+set_tests_properties(modern_vram_snapshot PROPERTIES LABELS unit)
+
+add_executable(modern_vram_snapshot_gpu_tests
+    modern_vram_snapshot_gpu_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_vram_snapshot.c)
+target_include_directories(modern_vram_snapshot_gpu_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+target_link_libraries(modern_vram_snapshot_gpu_tests PRIVATE SDL3::SDL3)
+add_test(NAME modern_vram_snapshot_gpu COMMAND modern_vram_snapshot_gpu_tests)
+set_tests_properties(modern_vram_snapshot_gpu PROPERTIES LABELS gpu SKIP_RETURN_CODE 77)
+
+add_executable(scenery_object_matrix_tests
+    scenery_object_matrix_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/build_scenery_object_matrix.c)
+target_include_directories(scenery_object_matrix_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(scenery_object_matrix_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(scenery_object_matrix_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(scenery_object_matrix_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME scenery_object_matrix COMMAND scenery_object_matrix_tests)
+set_tests_properties(scenery_object_matrix PROPERTIES LABELS unit)
+
+add_executable(car_model_drawing_tests
+    car_model_drawing_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/draw_player_car_model.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/car_render_rules.c)
+target_include_directories(car_model_drawing_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(car_model_drawing_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(car_model_drawing_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(car_model_drawing_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME car_model_drawing COMMAND car_model_drawing_tests)
+set_tests_properties(car_model_drawing PROPERTIES LABELS functional)
+
+add_executable(terrain_draw_setup_tests
+    terrain_draw_setup_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_terrain_cells.c)
+target_include_directories(terrain_draw_setup_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(terrain_draw_setup_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(terrain_draw_setup_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(terrain_draw_setup_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME terrain_draw_setup COMMAND terrain_draw_setup_tests)
+set_tests_properties(terrain_draw_setup PROPERTIES LABELS unit)
+
+add_executable(draw_area_packet_tests
+    draw_area_packet_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/draw_area_packet.c)
+target_include_directories(draw_area_packet_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(draw_area_packet_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(draw_area_packet_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(draw_area_packet_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME draw_area_packet COMMAND draw_area_packet_tests)
+set_tests_properties(draw_area_packet PROPERTIES LABELS unit)
+
+add_executable(rear_view_mirror_tests
+    rear_view_mirror_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/rear_view_mirror.c)
+target_include_directories(rear_view_mirror_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(rear_view_mirror_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(rear_view_mirror_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(rear_view_mirror_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME rear_view_mirror COMMAND rear_view_mirror_tests)
+set_tests_properties(rear_view_mirror PROPERTIES LABELS functional)
+
+add_executable(init_track_scene_tests
+    init_track_scene_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/init_track_scene.c)
+target_include_directories(init_track_scene_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(init_track_scene_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(init_track_scene_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(init_track_scene_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME init_track_scene COMMAND init_track_scene_tests)
+set_tests_properties(init_track_scene PROPERTIES LABELS functional)
+
+add_executable(scene_dispatch_tests
+    scene_dispatch_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/boot/dispatch_scene.c)
+target_include_directories(scene_dispatch_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(scene_dispatch_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(scene_dispatch_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(scene_dispatch_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME scene_dispatch COMMAND scene_dispatch_tests)
+set_tests_properties(scene_dispatch PROPERTIES LABELS unit)
+
+add_executable(scene_runtime_tests
+    scene_runtime_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/boot/scene_runtime.c)
+target_include_directories(scene_runtime_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(scene_runtime_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(scene_runtime_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(scene_runtime_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME scene_runtime COMMAND scene_runtime_tests)
+set_tests_properties(scene_runtime PROPERTIES LABELS unit)
+
+# Where the race HUD's sprites are built, as opposed to what the drawing
+# repositions each frame.
+add_executable(race_hud_layout_tests
+    race_hud_layout_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/build_race_hud_prims.c
+    ${CMAKE_SOURCE_DIR}/src/port/hud_config.c)
+target_include_directories(race_hud_layout_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(race_hud_layout_tests PRIVATE __psyz=1)
+if(MSVC AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(race_hud_layout_tests PRIVATE
+        "/clang:-iquote${CMAKE_SOURCE_DIR}/src/port/include"
+        "/clang:-iquote${CMAKE_SOURCE_DIR}/include")
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(race_hud_layout_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include")
+endif()
+target_link_libraries(race_hud_layout_tests PRIVATE psyz)
+add_test(NAME race_hud_layout COMMAND race_hud_layout_tests)
+set_tests_properties(race_hud_layout PROPERTIES LABELS functional)
+
+add_executable(race_hud_placement_tests
+    race_hud_placement_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/build_race_hud_prims.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/build_sprite_from_desc.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/race_hud.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/race/draw_split_times.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/race/split_time_display.c
+    ${CMAKE_SOURCE_DIR}/src/port/hud_config.c)
+target_include_directories(race_hud_placement_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+if(MSVC AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(race_hud_placement_tests PRIVATE
+        "/clang:-iquote${CMAKE_SOURCE_DIR}/src/port/include"
+        "/clang:-iquote${CMAKE_SOURCE_DIR}/include")
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(race_hud_placement_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include")
+endif()
+target_link_libraries(race_hud_placement_tests PRIVATE psyz)
+add_test(NAME race_hud_placement COMMAND race_hud_placement_tests)
+set_tests_properties(race_hud_placement PROPERTIES LABELS functional)
+
+add_executable(hud_config_tests
+    hud_config_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/hud_config.c)
+target_include_directories(hud_config_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(hud_config_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME hud_config COMMAND hud_config_tests)
+
+set_tests_properties(hud_config PROPERTIES LABELS functional)
+# Where a stage puts its camera: pure scene composition, no GPU involved.
+add_executable(render_stage_tests render_stage_tests.c)
+target_link_libraries(render_stage_tests PRIVATE rage-render-world)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(render_stage_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME render_stage COMMAND render_stage_tests)
+set_tests_properties(render_stage PROPERTIES LABELS functional)
+add_executable(rmesh_tests rmesh_tests.c)
+target_link_libraries(rmesh_tests PRIVATE rage-rmesh)
+if(MSVC)
+    target_compile_options(rmesh_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(rmesh_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME rmesh COMMAND rmesh_tests)
+
+set_tests_properties(rmesh PROPERTIES LABELS functional)
+add_executable(rmesh_index_tests rmesh_index_tests.c)
+target_link_libraries(rmesh_index_tests PRIVATE rage-rmesh)
+if(MSVC)
+    target_compile_options(rmesh_index_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(rmesh_index_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME rmesh_index COMMAND rmesh_index_tests)
+
+set_tests_properties(rmesh_index PROPERTIES LABELS functional)
+add_executable(asset_id_tests asset_id_tests.c)
+target_link_libraries(asset_id_tests PRIVATE rage-rmesh)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(asset_id_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME asset_id COMMAND asset_id_tests)
+
+set_tests_properties(asset_id PROPERTIES LABELS functional)
+
+add_executable(model_banks_tests
+    model_banks_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/model_banks.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/install_terrain_cell_data.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/car_asset_slots.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/car/car_catalog.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/init_render_state.c)
+target_link_libraries(model_banks_tests PRIVATE rage-content)
+target_include_directories(model_banks_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(model_banks_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(model_banks_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(model_banks_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME model_banks COMMAND model_banks_tests)
+set_tests_properties(model_banks PROPERTIES LABELS unit)
+add_executable(car_paint_tests car_paint_tests.c)
+target_link_libraries(car_paint_tests PRIVATE rage-rmesh)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(car_paint_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME car_paint COMMAND car_paint_tests)
+
+set_tests_properties(car_paint PROPERTIES LABELS functional)
+add_executable(texture_mipmap_tests texture_mipmap_tests.c)
+target_link_libraries(texture_mipmap_tests PRIVATE rage-rmesh)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(texture_mipmap_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME texture_mipmap COMMAND texture_mipmap_tests)
+
+set_tests_properties(texture_mipmap PROPERTIES LABELS functional)
+add_executable(render_material_tests render_material_tests.c)
+target_link_libraries(render_material_tests PRIVATE rage-rmesh)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(render_material_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME render_material COMMAND render_material_tests)
+
+set_tests_properties(render_material PROPERTIES LABELS functional)
+add_executable(rmesh_cache_tests rmesh_cache_tests.c)
+target_link_libraries(rmesh_cache_tests PRIVATE rage-rmesh)
+if(MSVC)
+    target_compile_options(rmesh_cache_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(rmesh_cache_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME rmesh_cache COMMAND rmesh_cache_tests)
+
+set_tests_properties(rmesh_cache PROPERTIES LABELS functional)
+add_executable(visible_cell_tests
+    visible_cell_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/visible_cell_lookup.c)
+target_include_directories(visible_cell_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(visible_cell_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include")
+endif()
+target_link_libraries(visible_cell_tests PRIVATE psyz)
+add_test(NAME visible_cell COMMAND visible_cell_tests)
+set_tests_properties(visible_cell PROPERTIES LABELS functional)
+
+add_executable(visible_cell_scan_tests
+    visible_cell_scan_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/visible_cell_scan.c)
+target_include_directories(visible_cell_scan_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(visible_cell_scan_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME visible_cell_scan COMMAND visible_cell_scan_tests)
+set_tests_properties(visible_cell_scan PROPERTIES LABELS unit)
+
+add_executable(visible_cells_tests
+    visible_cells_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_course_objects.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/visible_cells.c)
+target_include_directories(visible_cells_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include)
+target_compile_definitions(visible_cells_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(visible_cells_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME visible_cells COMMAND visible_cells_tests)
+set_tests_properties(visible_cells PROPERTIES LABELS unit)
+
+add_executable(sky_background_tests
+    sky_background_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_sky_background.c)
+target_include_directories(sky_background_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include)
+target_compile_definitions(sky_background_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(sky_background_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(sky_background_tests PRIVATE psyz)
+add_test(NAME sky_background COMMAND sky_background_tests)
+set_tests_properties(sky_background PROPERTIES LABELS unit)
+
+add_executable(classic_motion_tests classic_motion_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/classic_motion.c)
+target_include_directories(classic_motion_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/port)
+target_compile_options(classic_motion_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+if(NOT MSVC)
+    target_link_libraries(classic_motion_tests PRIVATE m)
+endif()
+if(RAGE_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(classic_motion_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(classic_motion_tests PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME classic_motion COMMAND classic_motion_tests)
+set_tests_properties(classic_motion PROPERTIES LABELS unit)
+
+add_executable(modern_frame_pacer_tests modern_frame_pacer_tests.c)
+
+add_executable(track_material_page_tests track_material_page_tests.c)
+target_include_directories(track_material_page_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME track_material_page COMMAND track_material_page_tests)
+set_tests_properties(track_material_page PROPERTIES LABELS unit)
+target_include_directories(modern_frame_pacer_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/modern)
+add_test(NAME modern_frame_pacer COMMAND modern_frame_pacer_tests)
+set_tests_properties(modern_frame_pacer PROPERTIES LABELS unit)
+
+add_executable(modern_presentation_clock_tests
+    modern_presentation_clock_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_presentation_clock.c)
+target_include_directories(modern_presentation_clock_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/modern)
+if(MSVC)
+    target_compile_options(modern_presentation_clock_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(modern_presentation_clock_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME modern_presentation_clock COMMAND modern_presentation_clock_tests)
+set_tests_properties(modern_presentation_clock PROPERTIES LABELS unit)
+
+add_executable(modern_prepared_materials_tests
+    modern_prepared_materials_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_prepared_materials.c)
+target_include_directories(modern_prepared_materials_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/port/modern)
+target_link_libraries(modern_prepared_materials_tests PRIVATE SDL3::SDL3)
+if(MSVC)
+    target_compile_options(modern_prepared_materials_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(modern_prepared_materials_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME modern_prepared_materials COMMAND modern_prepared_materials_tests)
+set_tests_properties(modern_prepared_materials PROPERTIES LABELS unit)
+
+add_executable(modern_prepared_meshes_tests
+    modern_prepared_meshes_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_prepared_meshes.c)
+target_include_directories(modern_prepared_meshes_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/port/modern)
+target_link_libraries(modern_prepared_meshes_tests PRIVATE SDL3::SDL3)
+if(MSVC)
+    target_compile_options(modern_prepared_meshes_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(modern_prepared_meshes_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME modern_prepared_meshes COMMAND modern_prepared_meshes_tests)
+set_tests_properties(modern_prepared_meshes PROPERTIES LABELS unit)
+
+add_executable(modern_texture_index_tests
+    modern_texture_index_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_texture_index.c)
+target_include_directories(modern_texture_index_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/port/modern)
+if(MSVC)
+    target_compile_options(modern_texture_index_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(modern_texture_index_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME modern_texture_index COMMAND modern_texture_index_tests)
+set_tests_properties(modern_texture_index PROPERTIES LABELS unit)
+
+add_executable(modern_overlay_state_tests
+    modern_overlay_state_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_overlay_state.c)
+target_include_directories(modern_overlay_state_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/modern)
+target_link_libraries(modern_overlay_state_tests PRIVATE SDL3::SDL3)
+if(MSVC)
+    target_compile_options(modern_overlay_state_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(modern_overlay_state_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME modern_overlay_state COMMAND modern_overlay_state_tests)
+set_tests_properties(modern_overlay_state PROPERTIES LABELS unit)
+
+add_executable(modern_overlay_batches_tests
+    modern_overlay_batches_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_overlay_state.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_overlay_batches.c)
+target_include_directories(modern_overlay_batches_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/modern)
+target_link_libraries(modern_overlay_batches_tests PRIVATE SDL3::SDL3)
+if(MSVC)
+    target_compile_options(modern_overlay_batches_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(modern_overlay_batches_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME modern_overlay_batches COMMAND modern_overlay_batches_tests)
+set_tests_properties(modern_overlay_batches PROPERTIES LABELS unit)
+
+add_executable(modern_sky_geometry_tests modern_sky_geometry_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_sky_reprojection.c)
+target_include_directories(modern_sky_geometry_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/port/modern)
+if(NOT MSVC)
+    target_link_libraries(modern_sky_geometry_tests PRIVATE m)
+endif()
+add_test(NAME modern_sky_geometry COMMAND modern_sky_geometry_tests)
+set_tests_properties(modern_sky_geometry PROPERTIES LABELS unit)
+
+add_executable(sky_panorama_layout_tests
+    sky_panorama_layout_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/sky_panorama_layout.c)
+target_include_directories(sky_panorama_layout_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(MSVC)
+    target_compile_options(sky_panorama_layout_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(sky_panorama_layout_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME sky_panorama_layout COMMAND sky_panorama_layout_tests)
+set_tests_properties(sky_panorama_layout PROPERTIES LABELS unit)
+
+add_executable(route_scenery_tests
+    route_scenery_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/update_route_scenery.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/gte_matrix.c)
+target_include_directories(route_scenery_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(route_scenery_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(route_scenery_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(route_scenery_tests PRIVATE psyz)
+add_test(NAME route_scenery COMMAND route_scenery_tests)
+set_tests_properties(route_scenery PROPERTIES LABELS functional)
+
+add_executable(scripted_scenery_draw_tests
+    scripted_scenery_draw_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_flyby_scenery.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_path_scenery.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_route_scenery.c)
+target_include_directories(scripted_scenery_draw_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(scripted_scenery_draw_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(scripted_scenery_draw_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(scripted_scenery_draw_tests PRIVATE psyz)
+add_test(NAME scripted_scenery_draw COMMAND scripted_scenery_draw_tests)
+set_tests_properties(scripted_scenery_draw PROPERTIES LABELS functional)
+
+add_executable(path_scenery_init_tests
+    path_scenery_init_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/init_path_scenery.c)
+target_include_directories(path_scenery_init_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(path_scenery_init_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(path_scenery_init_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(path_scenery_init_tests PRIVATE psyz)
+add_test(NAME path_scenery_init COMMAND path_scenery_init_tests)
+set_tests_properties(path_scenery_init PROPERTIES LABELS functional)
+
+add_executable(path_scenery_playback_tests
+    path_scenery_playback_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/init_path_scenery.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/update_path_scenery.c)
+target_include_directories(path_scenery_playback_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(path_scenery_playback_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(path_scenery_playback_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(path_scenery_playback_tests PRIVATE psyz)
+add_test(NAME path_scenery_playback COMMAND path_scenery_playback_tests)
+set_tests_properties(path_scenery_playback PROPERTIES LABELS functional)
+
+add_executable(flyby_scenery_seed_tests
+    flyby_scenery_seed_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/seed_flyby_scenery.c)
+target_include_directories(flyby_scenery_seed_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(flyby_scenery_seed_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(flyby_scenery_seed_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(flyby_scenery_seed_tests PRIVATE psyz)
+add_test(NAME flyby_scenery_seed COMMAND flyby_scenery_seed_tests)
+set_tests_properties(flyby_scenery_seed PROPERTIES LABELS functional)
+
+add_executable(flyby_scenery_playback_tests
+    flyby_scenery_playback_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/flyby_scenery.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/gte_matrix.c)
+target_include_directories(flyby_scenery_playback_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(flyby_scenery_playback_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(flyby_scenery_playback_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(flyby_scenery_playback_tests PRIVATE psyz)
+add_test(NAME flyby_scenery_playback COMMAND flyby_scenery_playback_tests)
+set_tests_properties(flyby_scenery_playback PROPERTIES LABELS functional)
+
+add_executable(course_scenery_dispatch_tests
+    course_scenery_dispatch_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/course_scenery.c)
+target_include_directories(course_scenery_dispatch_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(course_scenery_dispatch_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(course_scenery_dispatch_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(course_scenery_dispatch_tests PRIVATE psyz)
+add_test(NAME course_scenery_dispatch COMMAND course_scenery_dispatch_tests)
+set_tests_properties(course_scenery_dispatch PROPERTIES LABELS functional)
+
+add_executable(shuttle_scenery_init_tests
+    shuttle_scenery_init_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/init_shuttle_scenery.c)
+target_include_directories(shuttle_scenery_init_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(shuttle_scenery_init_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(shuttle_scenery_init_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(shuttle_scenery_init_tests PRIVATE psyz)
+add_test(NAME shuttle_scenery_init COMMAND shuttle_scenery_init_tests)
+set_tests_properties(shuttle_scenery_init PROPERTIES LABELS functional)
+
+add_executable(shuttle_scenery_playback_tests
+    shuttle_scenery_playback_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/update_shuttle_scenery.c)
+target_include_directories(shuttle_scenery_playback_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(shuttle_scenery_playback_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(shuttle_scenery_playback_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(shuttle_scenery_playback_tests PRIVATE psyz)
+add_test(NAME shuttle_scenery_playback COMMAND shuttle_scenery_playback_tests)
+set_tests_properties(shuttle_scenery_playback PROPERTIES LABELS functional)
+
+add_executable(shuttle_scenery_draw_tests
+    shuttle_scenery_draw_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_shuttle_scenery.c)
+target_include_directories(shuttle_scenery_draw_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(shuttle_scenery_draw_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(shuttle_scenery_draw_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(shuttle_scenery_draw_tests PRIVATE psyz)
+add_test(NAME shuttle_scenery_draw COMMAND shuttle_scenery_draw_tests)
+set_tests_properties(shuttle_scenery_draw PROPERTIES LABELS functional)
+
+add_executable(spinning_scenery_tests
+    spinning_scenery_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_spinning_scenery.c)
+target_include_directories(spinning_scenery_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(spinning_scenery_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(spinning_scenery_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(spinning_scenery_tests PRIVATE psyz)
+add_test(NAME spinning_scenery COMMAND spinning_scenery_tests)
+set_tests_properties(spinning_scenery PROPERTIES LABELS functional)
+
+add_executable(static_scenery_tests
+    static_scenery_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_static_scenery.c)
+target_include_directories(static_scenery_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(static_scenery_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(static_scenery_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(static_scenery_tests PRIVATE psyz)
+add_test(NAME static_scenery COMMAND static_scenery_tests)
+set_tests_properties(static_scenery PROPERTIES LABELS functional)
+
+add_executable(scripted_scenery_dispatch_tests
+    scripted_scenery_dispatch_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_scripted_scenery.c)
+target_include_directories(scripted_scenery_dispatch_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(scripted_scenery_dispatch_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(scripted_scenery_dispatch_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(scripted_scenery_dispatch_tests PRIVATE psyz)
+add_test(NAME scripted_scenery_dispatch COMMAND scripted_scenery_dispatch_tests)
+set_tests_properties(scripted_scenery_dispatch PROPERTIES LABELS functional)
+
+add_executable(animated_scenery_tests
+    animated_scenery_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/animated_scenery.c)
+target_include_directories(animated_scenery_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(animated_scenery_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(animated_scenery_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(animated_scenery_tests PRIVATE psyz)
+add_test(NAME animated_scenery COMMAND animated_scenery_tests)
+set_tests_properties(animated_scenery PROPERTIES LABELS functional)
+
+add_executable(start_grid_scenery_tests
+    start_grid_scenery_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/draw_start_grid_scenery.c)
+target_include_directories(start_grid_scenery_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(start_grid_scenery_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(start_grid_scenery_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(start_grid_scenery_tests PRIVATE psyz)
+add_test(NAME start_grid_scenery COMMAND start_grid_scenery_tests)
+set_tests_properties(start_grid_scenery PROPERTIES LABELS functional)
+
+add_executable(track_event_sound_tests
+    track_event_sound_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/update_track_event_sound.c)
+target_include_directories(track_event_sound_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(track_event_sound_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(track_event_sound_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(track_event_sound_tests PRIVATE psyz)
+add_test(NAME track_event_sound COMMAND track_event_sound_tests)
+set_tests_properties(track_event_sound PROPERTIES LABELS functional)
+
+add_executable(point_ambience_tests
+    point_ambience_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/update_point_ambience.c)
+target_include_directories(point_ambience_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(point_ambience_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(point_ambience_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(point_ambience_tests PRIVATE psyz)
+add_test(NAME point_ambience COMMAND point_ambience_tests)
+set_tests_properties(point_ambience PROPERTIES LABELS functional)
+
+add_executable(zone_ambience_tests
+    zone_ambience_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/update_zone_ambience.c)
+target_include_directories(zone_ambience_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(zone_ambience_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(zone_ambience_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(zone_ambience_tests PRIVATE psyz)
+add_test(NAME zone_ambience COMMAND zone_ambience_tests)
+set_tests_properties(zone_ambience PROPERTIES LABELS functional)
+
+add_executable(race_cue_tests
+    race_cue_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/trigger_race_cues.c)
+target_include_directories(race_cue_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(race_cue_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(race_cue_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(race_cue_tests PRIVATE psyz)
+add_test(NAME race_cue COMMAND race_cue_tests)
+set_tests_properties(race_cue PROPERTIES LABELS functional)
+
+add_executable(environment_script_tests
+    environment_script_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/environment_script.c)
+target_include_directories(environment_script_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(environment_script_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(environment_script_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(environment_script_tests PRIVATE psyz)
+add_test(NAME environment_script COMMAND environment_script_tests)
+set_tests_properties(environment_script PROPERTIES LABELS functional)
+
+add_executable(track_zone_blend_tests
+    track_zone_blend_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/get_track_zone_blend.c)
+target_include_directories(track_zone_blend_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(track_zone_blend_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(track_zone_blend_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(track_zone_blend_tests PRIVATE psyz)
+add_test(NAME track_zone_blend COMMAND track_zone_blend_tests)
+set_tests_properties(track_zone_blend PROPERTIES LABELS functional)
+
+add_executable(install_track_points_tests
+    install_track_points_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/track/install_track_points.c)
+target_include_directories(install_track_points_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(install_track_points_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(install_track_points_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(install_track_points_tests PRIVATE psyz rage-content)
+add_test(NAME install_track_points COMMAND install_track_points_tests)
+set_tests_properties(install_track_points PROPERTIES LABELS functional)
+
+add_executable(mirror_pass_tests
+    mirror_pass_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/mirror_pass.c)
+target_include_directories(mirror_pass_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(mirror_pass_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(mirror_pass_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(mirror_pass_tests PRIVATE psyz)
+add_test(NAME mirror_pass COMMAND mirror_pass_tests)
+set_tests_properties(mirror_pass PROPERTIES LABELS functional)
+
+add_test(NAME hud_anchoring
+    COMMAND source_contract_tests hud_anchoring ${CMAKE_SOURCE_DIR})
+set_tests_properties(hud_anchoring PROPERTIES LABELS functional)
+
+add_test(NAME native_sky_projection
+    COMMAND source_contract_tests native_sky_projection ${CMAKE_SOURCE_DIR})
+
+set_tests_properties(native_sky_projection PROPERTIES LABELS functional)
+
+add_test(NAME asset_preparation
+    COMMAND source_contract_tests asset_preparation ${CMAKE_SOURCE_DIR})
+set_tests_properties(asset_preparation PROPERTIES LABELS unit)
+add_executable(render_view_transform_tests render_view_transform_tests.c)
+target_link_libraries(render_view_transform_tests PRIVATE rage-render-world)
+if(NOT MSVC)
+    target_compile_options(render_view_transform_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME render_view_transform COMMAND render_view_transform_tests)
+set_tests_properties(render_view_transform PROPERTIES LABELS unit)
+
+add_executable(render_world_tests render_world_tests.c)
+target_link_libraries(render_world_tests PRIVATE rage-render-world)
+if(MSVC)
+    target_compile_options(render_world_tests PRIVATE /W4 /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(render_world_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME render_world COMMAND render_world_tests)
+
+set_tests_properties(render_world PROPERTIES LABELS functional)
+add_executable(render_world_snapshot_tests render_world_snapshot_tests.c)
+target_link_libraries(render_world_snapshot_tests PRIVATE rage-render-world)
+if(MSVC)
+    target_compile_options(render_world_snapshot_tests PRIVATE /W4 /WX)
+    target_compile_definitions(render_world_snapshot_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(render_world_snapshot_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME render_world_snapshot COMMAND render_world_snapshot_tests)
+
+set_tests_properties(render_world_snapshot PROPERTIES LABELS functional)
+add_executable(track_asset_identity_tests
+    track_asset_identity_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/track_asset_identity.c)
+target_include_directories(track_asset_identity_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(track_asset_identity_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME track_asset_identity COMMAND track_asset_identity_tests)
+
+set_tests_properties(track_asset_identity PROPERTIES LABELS functional)
+add_executable(track_lighting_tests
+    track_lighting_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/track_lighting.c)
+target_link_libraries(track_lighting_tests PRIVATE rage-render-world)
+target_include_directories(track_lighting_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(track_lighting_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME track_lighting COMMAND track_lighting_tests)
+
+set_tests_properties(track_lighting PROPERTIES LABELS functional)
+add_executable(zone_lighting_tests
+    zone_lighting_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/track_lighting.c)
+target_include_directories(zone_lighting_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(zone_lighting_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(zone_lighting_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(zone_lighting_tests PRIVATE psyz)
+add_test(NAME zone_lighting COMMAND zone_lighting_tests)
+set_tests_properties(zone_lighting PROPERTIES LABELS unit)
+
+add_executable(course_coordinate_tests course_coordinate_tests.c)
+target_include_directories(course_coordinate_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(course_coordinate_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME course_coordinate COMMAND course_coordinate_tests)
+
+set_tests_properties(course_coordinate PROPERTIES LABELS functional)
+add_executable(render_mesh_build_tests render_mesh_build_tests.c)
+add_executable(render_geometry_pack_tests render_geometry_pack_tests.c)
+target_link_libraries(render_geometry_pack_tests PRIVATE rage-render-world)
+target_compile_options(render_geometry_pack_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME render_geometry_pack COMMAND render_geometry_pack_tests)
+set_tests_properties(render_geometry_pack PROPERTIES LABELS unit)
+target_link_libraries(render_mesh_build_tests PRIVATE rage-render-world)
+target_compile_options(render_mesh_build_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME render_mesh_build COMMAND render_mesh_build_tests)
+
+set_tests_properties(render_mesh_build PROPERTIES LABELS functional)
+add_executable(native_geometry_interpolation_tests
+    native_geometry_interpolation_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/native_geometry_interpolation.c)
+target_include_directories(native_geometry_interpolation_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+target_link_libraries(native_geometry_interpolation_tests PRIVATE psyz)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(native_geometry_interpolation_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+if(RAGE_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(native_geometry_interpolation_tests PRIVATE
+        -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(native_geometry_interpolation_tests PRIVATE
+        -fsanitize=address,undefined)
+endif()
+add_test(NAME native_geometry_interpolation
+         COMMAND native_geometry_interpolation_tests)
+
+set_tests_properties(native_geometry_interpolation PROPERTIES LABELS functional)
+
+add_executable(gte_matrix_tests
+    gte_matrix_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/gte_matrix.c)
+target_include_directories(gte_matrix_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include)
+target_link_libraries(gte_matrix_tests PRIVATE psyz)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(gte_matrix_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME gte_matrix COMMAND gte_matrix_tests)
+set_tests_properties(gte_matrix PROPERTIES LABELS unit)
+
+add_test(
+    NAME native_frame_offsets
+    COMMAND source_contract_tests native_frame_offsets ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(native_frame_offsets PROPERTIES LABELS functional)
+add_test(
+    NAME frame_environment_aliases
+    COMMAND source_contract_tests frame_environment_aliases ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(frame_environment_aliases PROPERTIES LABELS functional)
+add_test(
+    NAME capture_sync
+    COMMAND source_contract_tests capture_sync ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(capture_sync PROPERTIES LABELS functional)
+
+add_executable(display_setup_tests
+    display_setup_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/display_setup.c)
+target_include_directories(display_setup_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(display_setup_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(display_setup_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(display_setup_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(display_setup_tests PRIVATE psyz)
+add_test(NAME display_setup COMMAND display_setup_tests)
+set_tests_properties(display_setup PROPERTIES LABELS unit)
+
+add_executable(track_math_tests
+    track_math_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/track_textures.c)
+target_include_directories(track_math_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(track_math_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(track_math_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(track_math_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+endif()
+target_link_libraries(track_math_tests PRIVATE psyz)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(track_math_tests PRIVATE ${RAGE_NONFATAL_WARNING_OPTIONS})
+endif()
+add_test(NAME track_math COMMAND track_math_tests)
+set_tests_properties(track_math PROPERTIES LABELS functional)
+
+add_executable(draw_prims_tests
+    draw_prims_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/draw_prims.c)
+target_include_directories(draw_prims_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(draw_prims_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(draw_prims_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(draw_prims_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+endif()
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(draw_prims_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(draw_prims_tests PRIVATE psyz)
+add_test(NAME draw_prims COMMAND draw_prims_tests)
+set_tests_properties(draw_prims PROPERTIES LABELS functional)
+
+add_executable(draw_packet_queue_tests
+    draw_packet_queue_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/draw_prims.c)
+target_include_directories(draw_packet_queue_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(draw_packet_queue_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(draw_packet_queue_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(draw_packet_queue_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(draw_packet_queue_tests PRIVATE psyz)
+add_test(NAME draw_packet_queue COMMAND draw_packet_queue_tests)
+set_tests_properties(draw_packet_queue PROPERTIES LABELS unit)
+
+add_executable(object_matrix_tests
+    object_matrix_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/object_matrix.c)
+target_include_directories(object_matrix_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(object_matrix_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(object_matrix_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(object_matrix_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(object_matrix_tests PRIVATE psyz)
+add_test(NAME object_matrix COMMAND object_matrix_tests)
+set_tests_properties(object_matrix PROPERTIES LABELS unit)
+
+add_executable(car_render_rules_tests
+    car_render_rules_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/car_render_rules.c)
+target_include_directories(car_render_rules_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(car_render_rules_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME car_render_rules COMMAND car_render_rules_tests)
+set_tests_properties(car_render_rules PROPERTIES LABELS unit)
+
+add_executable(atan2_tests
+    atan2_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/rot_matrix.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/math/angle.c)
+target_include_directories(atan2_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(atan2_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(atan2_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(atan2_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(atan2_tests PRIVATE psyz)
+add_test(NAME table_atan2 COMMAND atan2_tests)
+set_tests_properties(table_atan2 PROPERTIES LABELS unit)
+
+add_executable(car_model_matrix_tests
+    car_model_matrix_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/car_model_matrix.c)
+target_include_directories(car_model_matrix_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(car_model_matrix_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(car_model_matrix_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(car_model_matrix_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME car_model_matrix COMMAND car_model_matrix_tests)
+set_tests_properties(car_model_matrix PROPERTIES LABELS unit)
+
+add_executable(add_tile_prim_tests
+    add_tile_prim_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/add_tile_prim.c)
+target_include_directories(add_tile_prim_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(add_tile_prim_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(add_tile_prim_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(add_tile_prim_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(add_tile_prim_tests PRIVATE psyz)
+add_test(NAME add_tile_prim COMMAND add_tile_prim_tests)
+set_tests_properties(add_tile_prim PROPERTIES LABELS unit)
+
+add_executable(basic_text_tests
+    basic_text_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/text_8x8.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/sprite_string.c)
+target_include_directories(basic_text_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(basic_text_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(basic_text_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(basic_text_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(basic_text_tests PRIVATE psyz)
+add_test(NAME basic_text COMMAND basic_text_tests)
+set_tests_properties(basic_text PROPERTIES LABELS unit)
+
+add_executable(atlas_text_tests
+    atlas_text_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/atlas_text.c)
+target_include_directories(atlas_text_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(atlas_text_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(atlas_text_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(atlas_text_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME atlas_text COMMAND atlas_text_tests)
+set_tests_properties(atlas_text PROPERTIES LABELS unit)
+
+add_executable(bit_pattern_overlay_tests
+    bit_pattern_overlay_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/bit_pattern_overlay.c)
+target_include_directories(bit_pattern_overlay_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(bit_pattern_overlay_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(bit_pattern_overlay_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(bit_pattern_overlay_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME bit_pattern_overlay COMMAND bit_pattern_overlay_tests)
+set_tests_properties(bit_pattern_overlay PROPERTIES LABELS unit)
+
+add_executable(number_drawing_tests
+    number_drawing_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/number_drawing.c)
+target_include_directories(number_drawing_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(number_drawing_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(number_drawing_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(number_drawing_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME number_drawing COMMAND number_drawing_tests)
+set_tests_properties(number_drawing PROPERTIES LABELS unit)
+
+add_executable(hud_packet_emitters_tests
+    hud_packet_emitters_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/race/draw_hud_digit.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/race/draw_wrong_way_warning.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/fullscreen_fade.c)
+target_include_directories(hud_packet_emitters_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(hud_packet_emitters_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(hud_packet_emitters_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(hud_packet_emitters_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(hud_packet_emitters_tests PRIVATE psyz)
+add_test(NAME hud_packet_emitters COMMAND hud_packet_emitters_tests)
+set_tests_properties(hud_packet_emitters PROPERTIES LABELS unit)
+
+add_executable(build_sprite_from_desc_tests
+    build_sprite_from_desc_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/build_sprite_from_desc.c)
+target_include_directories(build_sprite_from_desc_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(build_sprite_from_desc_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(build_sprite_from_desc_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(build_sprite_from_desc_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(build_sprite_from_desc_tests PRIVATE psyz)
+add_test(NAME build_sprite_from_desc COMMAND build_sprite_from_desc_tests)
+set_tests_properties(build_sprite_from_desc PROPERTIES LABELS unit)
+
+add_executable(tachometer_tests
+    tachometer_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/speed_display.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/race/draw_tachometer.c)
+target_include_directories(tachometer_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(tachometer_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(tachometer_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(tachometer_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(tachometer_tests PRIVATE psyz)
+add_test(NAME tachometer COMMAND tachometer_tests)
+set_tests_properties(tachometer PROPERTIES LABELS functional)
+
+add_executable(tachometer_needle_tests
+    tachometer_needle_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/tachometer_needle.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/build_sprite_from_desc.c)
+target_include_directories(tachometer_needle_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(tachometer_needle_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(tachometer_needle_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(tachometer_needle_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(tachometer_needle_tests PRIVATE psyz)
+add_test(NAME tachometer_needle COMMAND tachometer_needle_tests)
+set_tests_properties(tachometer_needle PROPERTIES LABELS unit)
+
+add_executable(speed_digits_tests
+    speed_digits_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/race/draw_speed_digits.c)
+target_include_directories(speed_digits_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(speed_digits_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(speed_digits_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(speed_digits_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME speed_digits COMMAND speed_digits_tests)
+set_tests_properties(speed_digits PROPERTIES LABELS unit)
+
+add_executable(boot_logo_tests
+    boot_logo_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/boot/draw_boot_logo.c)
+target_include_directories(boot_logo_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(boot_logo_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(boot_logo_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(boot_logo_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME boot_logo COMMAND boot_logo_tests)
+set_tests_properties(boot_logo PROPERTIES LABELS unit)
+
+add_executable(boot_logo_scene_tests
+    boot_logo_scene_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/boot/boot_scene.c)
+target_include_directories(boot_logo_scene_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(boot_logo_scene_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(boot_logo_scene_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(boot_logo_scene_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME boot_logo_scene COMMAND boot_logo_scene_tests)
+set_tests_properties(boot_logo_scene PROPERTIES LABELS functional)
+
+add_executable(init_subsystems_tests
+    init_subsystems_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/boot/init_subsystems.c)
+target_include_directories(init_subsystems_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(init_subsystems_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(init_subsystems_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(init_subsystems_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME init_subsystems COMMAND init_subsystems_tests)
+set_tests_properties(init_subsystems PROPERTIES LABELS functional)
+
+add_executable(proportional_text_tests
+    proportional_text_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/render/text.c)
+target_include_directories(proportional_text_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(proportional_text_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(proportional_text_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(proportional_text_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+endif()
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(proportional_text_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(proportional_text_tests PRIVATE psyz)
+add_test(NAME proportional_text COMMAND proportional_text_tests)
+set_tests_properties(proportional_text PROPERTIES LABELS unit)
+
+if(TARGET rage-racer-smoke)
+    add_test(
+        NAME boot_frame
+        COMMAND ${CMAKE_COMMAND}
+            -DGAME=$<TARGET_FILE:rage-racer-smoke> -DCHECK=$<TARGET_FILE:ppm_capture_check>
+            -DSOURCE=${CMAKE_SOURCE_DIR} -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_boot_frame.cmake
+    )
+set_tests_properties(boot_frame PROPERTIES LABELS e2e)
+    set_tests_properties(boot_frame PROPERTIES TIMEOUT 60)
+    add_test(
+        NAME title_page_stability
+        COMMAND ${CMAKE_COMMAND}
+            -DGAME=$<TARGET_FILE:rage-racer-smoke> -DCHECK=$<TARGET_FILE:ppm_capture_check>
+            -DSOURCE=${CMAKE_SOURCE_DIR} -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_title_page_stability.cmake
+    )
+set_tests_properties(title_page_stability PROPERTIES LABELS e2e)
+    set_tests_properties(title_page_stability PROPERTIES TIMEOUT 60)
+    add_test(NAME mirrored_track COMMAND ${CMAKE_COMMAND}
+        -DGAME=$<TARGET_FILE:rage-racer-smoke> -DSOURCE=${CMAKE_SOURCE_DIR}
+        -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_mirrored_track.cmake)
+set_tests_properties(mirrored_track PROPERTIES LABELS e2e)
+    set_tests_properties(mirrored_track PROPERTIES TIMEOUT 360)
+    add_test(
+        NAME prologue_frame
+        COMMAND ${CMAKE_COMMAND} -DGAME=$<TARGET_FILE:rage-racer-smoke>
+            -DCHECK=$<TARGET_FILE:ppm_capture_check> -DSOURCE=${CMAKE_SOURCE_DIR}
+            -DOUTPUT_ROOT=${CMAKE_BINARY_DIR} -DSTYLE=international
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_prologue_frame.cmake
+    )
+set_tests_properties(prologue_frame PROPERTIES LABELS e2e)
+    set_tests_properties(prologue_frame PROPERTIES TIMEOUT 90)
+    add_test(
+        NAME japanese_prologue_frame
+        COMMAND ${CMAKE_COMMAND} -DGAME=$<TARGET_FILE:rage-racer-smoke>
+            -DCHECK=$<TARGET_FILE:ppm_capture_check> -DSOURCE=${CMAKE_SOURCE_DIR}
+            -DOUTPUT_ROOT=${CMAKE_BINARY_DIR} -DSTYLE=japanese
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_prologue_frame.cmake
+    )
+set_tests_properties(japanese_prologue_frame PROPERTIES LABELS e2e)
+    set_tests_properties(japanese_prologue_frame PROPERTIES TIMEOUT 90)
+
+    add_test(
+        NAME scene_capture
+        COMMAND ${CMAKE_COMMAND} -DGAME=$<TARGET_FILE:rage-racer-smoke>
+            -DCHECK=$<TARGET_FILE:scene_capture_check> -DSOURCE=${CMAKE_SOURCE_DIR}
+            -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_scene_capture.cmake
+    )
+set_tests_properties(scene_capture PROPERTIES LABELS e2e)
+    set_tests_properties(scene_capture PROPERTIES TIMEOUT 360)
+    add_test(
+        NAME modern_feature_frames
+        COMMAND ${CMAKE_COMMAND} -DGAME=$<TARGET_FILE:rage-racer-smoke>
+            -DCHECK=$<TARGET_FILE:ppm_capture_check> -DSOURCE=${CMAKE_SOURCE_DIR}
+            -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_modern_feature_frames.cmake
+    )
+set_tests_properties(modern_feature_frames PROPERTIES LABELS e2e)
+    set_tests_properties(modern_feature_frames PROPERTIES TIMEOUT 360)
+
+    add_test(
+        NAME pegase_cabin
+        COMMAND ${CMAKE_COMMAND}
+            -DFIXTURE=$<TARGET_FILE:native_asset_fixture>
+            -DGAME=$<TARGET_FILE:rage-racer-smoke> -DCHECK=$<TARGET_FILE:ppm_capture_check>
+            -DSOURCE=${CMAKE_SOURCE_DIR} -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_pegase_cabin.cmake
+    )
+set_tests_properties(pegase_cabin PROPERTIES LABELS e2e)
+    set_tests_properties(pegase_cabin PROPERTIES TIMEOUT 180)
+
+    # The sky, which nothing watched: the visual references are captured from
+    # menus and the intro camera, where its horizon band and skirt are not
+    # drawn at all.
+    add_test(
+        NAME sky_frames
+        COMMAND ${CMAKE_COMMAND} -DGAME=$<TARGET_FILE:rage-racer-smoke>
+            -DCHECK=$<TARGET_FILE:ppm_capture_check> -DSOURCE=${CMAKE_SOURCE_DIR}
+            -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_sky_frames.cmake
+    )
+set_tests_properties(sky_frames PROPERTIES LABELS e2e)
+    set_tests_properties(sky_frames PROPERTIES TIMEOUT 600)
+
+    add_test(
+        NAME grand_prix_terrain_frame
+        COMMAND ${CMAKE_COMMAND} -DGAME=$<TARGET_FILE:rage-racer-smoke>
+            -DCHECK=$<TARGET_FILE:ppm_capture_check> -DSOURCE=${CMAKE_SOURCE_DIR}
+            -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_grand_prix_terrain_frame.cmake
+    )
+set_tests_properties(grand_prix_terrain_frame PROPERTIES LABELS e2e)
+    set_tests_properties(grand_prix_terrain_frame PROPERTIES TIMEOUT 120)
+
+    add_test(
+        NAME prologue_geometry
+        COMMAND ${CMAKE_COMMAND} -DGAME=$<TARGET_FILE:rage-racer-smoke>
+            -DCHECK=$<TARGET_FILE:ppm_capture_check> -DSOURCE=${CMAKE_SOURCE_DIR}
+            -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_prologue_geometry.cmake
+    )
+set_tests_properties(prologue_geometry PROPERTIES LABELS e2e TIMEOUT 60)
+
+    add_test(NAME mirror_entry COMMAND ${CMAKE_COMMAND}
+        -DGAME=$<TARGET_FILE:rage-racer-smoke> -DCHECK=$<TARGET_FILE:mirror_entry_check>
+        -DSOURCE=${CMAKE_SOURCE_DIR} -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_mirror_entry.cmake)
+    set_tests_properties(mirror_entry PROPERTIES LABELS e2e TIMEOUT 150)
+
+    add_test(
+        NAME waterfall
+        COMMAND ${CMAKE_COMMAND}
+            -DGAME=$<TARGET_FILE:rage-racer-smoke> -DCHECK=$<TARGET_FILE:ppm_capture_check>
+            -DSOURCE=${CMAKE_SOURCE_DIR} -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_waterfall.cmake
+    )
+set_tests_properties(waterfall PROPERTIES LABELS e2e)
+    set_tests_properties(waterfall PROPERTIES TIMEOUT 180)
+endif()
+add_executable(rmesh_replace_tests rmesh_replace_tests.c)
+add_executable(ppm_capture_check ppm_capture_check.c)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(ppm_capture_check PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_executable(scene_capture_check scene_capture_check.c)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(scene_capture_check PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_executable(modern_depth_probe_tests
+    modern_depth_probe_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_depth_probe.c)
+target_include_directories(modern_depth_probe_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(modern_depth_probe_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME modern_depth_probe COMMAND modern_depth_probe_tests)
+set_tests_properties(modern_depth_probe PROPERTIES LABELS unit)
+add_executable(modern_material_uniform_tests
+    modern_material_uniform_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/modern/modern_material_uniform.c)
+target_include_directories(modern_material_uniform_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(modern_material_uniform_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME modern_material_uniform COMMAND modern_material_uniform_tests)
+target_link_libraries(modern_material_uniform_tests PRIVATE rage-render-world)
+set_tests_properties(modern_material_uniform PROPERTIES LABELS unit)
+add_executable(mirror_entry_check mirror_entry_check.c)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(mirror_entry_check PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_executable(modern_png_tests modern_png_tests.c
+    ${PROJECT_SOURCE_DIR}/src/port/modern/modern_png.c)
+target_include_directories(modern_png_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(modern_png_tests PRIVATE SDL3::SDL3)
+add_test(NAME modern_png COMMAND modern_png_tests)
+set_tests_properties(modern_png PROPERTIES LABELS unit TIMEOUT 30)
+add_executable(modern_assets_retry_tests
+    modern_assets_retry_tests.c
+    ${PROJECT_SOURCE_DIR}/src/port/platform_paths.c
+    ${PROJECT_SOURCE_DIR}/src/port/runtime_config.c
+    ${PROJECT_SOURCE_DIR}/src/port/runtime_parse.c
+    ${PROJECT_SOURCE_DIR}/src/port/mod_assets.c
+    ${PROJECT_SOURCE_DIR}/src/port/texture_patch.c
+    ${PROJECT_SOURCE_DIR}/src/port/track_asset_identity.c
+    ${PROJECT_SOURCE_DIR}/src/port/sky_panorama_layout.c
+    ${PROJECT_SOURCE_DIR}/src/port/native_asset_importer_stubs.c
+    ${PROJECT_SOURCE_DIR}/src/port/modern/modern_assets.c
+    ${PROJECT_SOURCE_DIR}/src/port/modern/modern_prepared_materials.c
+    ${PROJECT_SOURCE_DIR}/src/port/modern/modern_png.c)
+target_include_directories(modern_assets_retry_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/src/port
+    ${PROJECT_SOURCE_DIR}/src/port/include ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(modern_assets_retry_tests PRIVATE rage-render-world rage-content SDL3::SDL3 miniz rage-json)
+add_dependencies(modern_assets_retry_tests rage-authored-cars)
+add_test(NAME modern_assets_retry COMMAND ${CMAKE_COMMAND} -E env
+    --unset=RAGE_PORT_MODERN_ASSETS $<TARGET_FILE:modern_assets_retry_tests>
+    ${CMAKE_CURRENT_BINARY_DIR}/modern-assets-retry-fixture)
+set_tests_properties(modern_assets_retry PROPERTIES LABELS unit TIMEOUT 30)
+if(RAGE_HAS_AUTHORED_CARS)
+add_executable(authored_car_asset_tests authored_car_asset_tests.c)
+target_link_libraries(authored_car_asset_tests PRIVATE rage-rmesh)
+add_dependencies(authored_car_asset_tests rage-authored-cars)
+add_test(NAME authored_car_asset COMMAND authored_car_asset_tests)
+set_tests_properties(authored_car_asset PROPERTIES LABELS unit)
+endif()
+target_link_libraries(rmesh_replace_tests PRIVATE rage-rmesh)
+add_test(NAME rmesh_replace COMMAND rmesh_replace_tests)
+set_tests_properties(rmesh_replace PROPERTIES LABELS unit)
+
+add_executable(vram_sample_mask_tests vram_sample_mask_tests.c)
+target_include_directories(vram_sample_mask_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/external/psyz/psyz/src/platform)
+add_test(NAME vram_sample_mask COMMAND vram_sample_mask_tests)
+set_tests_properties(vram_sample_mask PROPERTIES LABELS unit)
+
+if(TARGET rage-racer)
+    foreach(mode standard wide high_fps ultrawide super_ultrawide)
+        add_test(NAME classic_presentation_${mode}
+            COMMAND ${CMAKE_COMMAND} -DGAME=$<TARGET_FILE:rage-racer>
+                -DSOURCE=${CMAKE_SOURCE_DIR}
+                -DOUTPUT=${CMAKE_BINARY_DIR}/classic-presentation-${mode}
+                -DDISC=${RAGE_RUNTIME_DISC} -DMODE=${mode}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_classic_presentation.cmake)
+        set_tests_properties(classic_presentation_${mode} PROPERTIES
+            LABELS e2e TIMEOUT 100 RESOURCE_LOCK rage_gpu
+            SKIP_REGULAR_EXPRESSION "SKIP:")
+    endforeach()
+endif()
+
+if(TARGET rage-racer-smoke)
+    add_test(NAME native_vertex_budget COMMAND ${CMAKE_COMMAND}
+        -DGAME=$<TARGET_FILE:rage-racer-smoke> -DSOURCE=${CMAKE_SOURCE_DIR}
+        -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_vertex_budget.cmake)
+    set_tests_properties(native_vertex_budget PROPERTIES LABELS e2e TIMEOUT 270
+        SKIP_REGULAR_EXPRESSION "SKIP:")
+endif()
+
+add_executable(menu_images_tests menu_images_tests.c
+    ${PROJECT_SOURCE_DIR}/src/port/menu_images.c
+    ${PROJECT_SOURCE_DIR}/src/port/menu_label_font.c
+    ${PROJECT_SOURCE_DIR}/src/port/modern/modern_png.c
+    ${PROJECT_SOURCE_DIR}/src/main/PAL/main/menu/title_menu_labels.c)
+target_include_directories(menu_images_tests PRIVATE ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/port ${PROJECT_SOURCE_DIR}/src/port/include
+    ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/external/psyz/psyz/include)
+target_link_libraries(menu_images_tests PRIVATE SDL3::SDL3 rage-render-world rage-content)
+target_compile_definitions(menu_images_tests PRIVATE __psyz=1)
+add_test(NAME menu_images COMMAND menu_images_tests ${CMAKE_CURRENT_BINARY_DIR}/menu-images-fixture)
+set_tests_properties(menu_images PROPERTIES LABELS unit TIMEOUT 30)
+
+add_executable(menu_label_font_tests menu_label_font_tests.c
+    ${PROJECT_SOURCE_DIR}/src/port/menu_label_font.c
+    ${PROJECT_SOURCE_DIR}/src/main/PAL/main/menu/title_menu_labels.c)
+target_include_directories(menu_label_font_tests PRIVATE ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/port ${PROJECT_SOURCE_DIR}/src/port/include
+    ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/external/psyz/psyz/include)
+target_link_libraries(menu_label_font_tests PRIVATE rage-content)
+target_compile_definitions(menu_label_font_tests PRIVATE __psyz=1)
+target_compile_options(menu_label_font_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME menu_label_font COMMAND menu_label_font_tests)
+set_tests_properties(menu_label_font PROPERTIES LABELS unit TIMEOUT 30)
+
+if(TARGET rage-racer-smoke)
+    add_test(NAME modern_ultrawide COMMAND ${CMAKE_COMMAND}
+        -DGAME=$<TARGET_FILE:rage-racer-smoke> -DSOURCE=${CMAKE_SOURCE_DIR}
+        -DOUTPUT=${CMAKE_BINARY_DIR}/ultrawide -DDISC=${RAGE_RUNTIME_DISC}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_ultrawide.cmake)
+    set_tests_properties(modern_ultrawide PROPERTIES LABELS e2e TIMEOUT 250
+        RESOURCE_LOCK rage_gpu SKIP_REGULAR_EXPRESSION "SKIP:")
+endif()

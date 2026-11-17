@@ -1,0 +1,160 @@
+#include <assert.h>
+#include <string.h>
+
+#include "game/asset.h"
+#include "game/menu.h"
+#include "game/race.h"
+#include "game/render_internal.h"
+#include "game/state.h"
+
+static OptionMenu s_optionMenu;
+
+static u8 s_ImageData[16];
+static const GameImageAssetHeaderWord *s_UploadedImage;
+static s32 s_DisplayMask;
+static s32 s_RenderOtShift;
+static s32 s_DisplaySetups;
+static s32 s_CameraMatrixUpdates;
+static MATRIX *s_ColorMatrix;
+static MATRIX *s_LightMatrix;
+static s32 s_BackColor[3];
+static s32 s_FarColor[3];
+static s32 s_Fog[2];
+
+s32 g_AssetLoadState;
+static s32 s_AssetLoadFailed;
+u8 *g_ImageBlockBuffer = s_ImageData;
+size_t g_ImageBlockSize = sizeof(s_ImageData);
+s32 g_FrameSyncThreshold;
+s32 g_MirrorMode;
+s32 g_SceneId;
+s32 g_SceneTimer;
+s32 g_FadeLevel;
+s32 g_FadeStep;
+s32 g_GameMode;
+GameRenderState g_RenderState;
+Camera g_Camera;
+Matrix g_DefaultColorMatrix;
+Matrix g_DefaultLightMatrix;
+Matrix g_SceneColorMatrix;
+Matrix g_SceneLightMatrix;
+
+s32 AssetLoadCompletedSuccessfully(void) {
+    return g_AssetLoadState == 0 && !s_AssetLoadFailed;
+}
+
+void SetDispMask(s32 enabled) { s_DisplayMask = enabled; }
+s32 UploadImageAsset(const GameImageAssetHeaderWord *asset, size_t size) {
+    (void)size;
+    s_UploadedImage = asset;
+    return 1;
+}
+void InitRenderState(s32 otShift) { s_RenderOtShift = otShift; }
+void SetupDisplay480(s32 r, s32 g, s32 b) {
+    (void)b;
+    (void)g;
+    (void)r;
+    assert(r == 0 && g == 0 && b == 0);
+    s_DisplaySetups++;
+}
+void SetCameraRotMatrix(GameRenderState *state, const GameCameraState *camera) { (void)state; (void)camera; s_CameraMatrixUpdates++; }
+void SetColorMatrix(MATRIX *matrix) { s_ColorMatrix = matrix; }
+void SetLightMatrix(MATRIX *matrix) { s_LightMatrix = matrix; }
+void SetBackColor(long r, long g, long b) {
+    s_BackColor[0] = (s32)r;
+    s_BackColor[1] = (s32)g;
+    s_BackColor[2] = (s32)b;
+}
+void SetFarColor(long r, long g, long b) {
+    s_FarColor[0] = (s32)r;
+    s_FarColor[1] = (s32)g;
+    s_FarColor[2] = (s32)b;
+}
+void SetFogNear(long nearDistance, long projection) {
+    s_Fog[0] = (s32)nearDistance;
+    s_Fog[1] = (s32)projection;
+}
+
+static void ResetCalls(void) {
+    s_UploadedImage = NULL;
+    s_DisplayMask = -1;
+    s_RenderOtShift = -1;
+    s_DisplaySetups = 0;
+    s_CameraMatrixUpdates = 0;
+    s_ColorMatrix = NULL;
+    s_LightMatrix = NULL;
+}
+
+static void TestWaitsForAssets(void) {
+    ResetCalls();
+    s_AssetLoadFailed = 0;
+    g_AssetLoadState = 1;
+    g_SceneId = 99;
+
+    EnterAttractScene();
+
+    assert(s_DisplayMask == 0);
+    assert(g_FrameSyncThreshold == 0x80);
+    assert(s_UploadedImage == NULL);
+    assert(s_DisplaySetups == 0);
+    assert(g_SceneId == 99);
+}
+
+static void TestRejectsFailedAssets(void) {
+    ResetCalls();
+    g_AssetLoadState = 0;
+    s_AssetLoadFailed = 1;
+    g_SceneId = 99;
+
+    EnterAttractScene();
+
+    assert(s_UploadedImage == NULL);
+    assert(s_DisplaySetups == 0);
+    assert(g_SceneId == 99);
+}
+
+static void TestInitializesAttractScene(void) {
+    ResetCalls();
+    memset(&g_DefaultColorMatrix, 0x12, sizeof(g_DefaultColorMatrix));
+    memset(&g_DefaultLightMatrix, 0x34, sizeof(g_DefaultLightMatrix));
+    memset(&g_RenderState, 0x55, sizeof(g_RenderState));
+    g_AssetLoadState = 0;
+    s_AssetLoadFailed = 0;
+
+    EnterAttractScene();
+
+    assert(s_UploadedImage == GetImageAssetHeaderWords(s_ImageData));
+    assert(g_MirrorMode == 0);
+    assert(s_RenderOtShift == 5);
+    assert(s_DisplaySetups == 1);
+    assert(g_SceneId == 0x17 && g_SceneTimer == 0);
+    assert(memcmp(&g_SceneColorMatrix, &g_DefaultColorMatrix,
+                  sizeof(g_SceneColorMatrix)) == 0);
+    assert(memcmp(&g_SceneLightMatrix, &g_DefaultLightMatrix,
+                  sizeof(g_SceneLightMatrix)) == 0);
+    assert(s_ColorMatrix == &g_SceneColorMatrix);
+    assert(s_LightMatrix == &g_SceneLightMatrix);
+    assert(s_BackColor[0] == 0x20 && s_BackColor[1] == 0x20 &&
+           s_BackColor[2] == 0x20);
+    assert(s_FarColor[0] == 0 && s_FarColor[1] == 0 && s_FarColor[2] == 0);
+    assert(s_Fog[0] == 0x4E20 && s_Fog[1] == 0x140);
+    assert(g_Camera.view.x == 0 && g_Camera.view.y == 0 &&
+           g_Camera.view.z == -3520);
+    assert(g_Camera.view.angleX == 0 &&
+           g_Camera.view.angleY == 0 &&
+           g_Camera.view.angleZ == 0);
+    assert(s_CameraMatrixUpdates == 1);
+    assert(s_optionMenu.letterboxHeight == 240);
+    /* The fade-in is armed by the OPTION scene's first frame; the entry
+     * scene only selects the fade mode. */
+    assert(g_GameMode == 0);
+}
+
+int main(void) {
+    TestWaitsForAssets();
+    TestRejectsFailedAssets();
+    TestInitializesAttractScene();
+    return 0;
+}
+
+OptionMenu *MenuOption(void) { return &s_optionMenu; }

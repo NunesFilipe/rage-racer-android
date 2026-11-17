@@ -1,0 +1,852 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(rage_racer_port VERSION 0.6.9 LANGUAGES C CXX)
+
+set(RAGE_RACER_RELEASE_VERSION "nightly")
+
+# Native game, runtime, tools, and tests use the same portable C17 dialect.
+# Vendored projects select their own lower standard where required.
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+# Request the POSIX interfaces used by the native Linux runtime while keeping
+# the project in strict C17 mode. glibc otherwise hides APIs such as setenv,
+# strdup, readlink, and realpath when compiler extensions are disabled.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_compile_definitions(_POSIX_C_SOURCE=200809L _XOPEN_SOURCE=700)
+endif()
+
+# The retail data segment, split so each subsystem's state sits with the code
+# that reads it. Nothing links one of these without the rest: they were one
+# object file in retail and they still describe one program's state, so every
+# target that needs retail state takes the whole list.
+set(RAGE_HOST_STATE_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_car_catalog.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_asset.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_audio.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_car.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_cd.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_fmv.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_menu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_pad.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_race.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_render.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_save.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_track.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/port/host_state_shared.c
+)
+
+# The recovered game code relies on wrapping signed arithmetic and contains
+# deliberate type punning. Keep optimized host builds from treating either as
+# permission to rewrite game behavior.
+if(MSVC AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    # clang-cl accepts GNU driver flags only through its /clang: escape hatch.
+    # Passing them directly produces -Wunknown-argument and breaks the Windows
+    # release build once the port targets enable -Werror.
+    set(RAGE_COMPAT_COMPILE_OPTIONS
+        /clang:-fno-strict-aliasing
+        /clang:-fwrapv)
+    set(RAGE_WARNING_OPTIONS /clang:-Wall /clang:-Wextra)
+    set(RAGE_NONFATAL_WARNING_OPTIONS /clang:-Wall /clang:-Wextra /clang:-Wno-error)
+    set(RAGE_STRICT_WARNING_OPTIONS
+        /clang:-Wall
+        /clang:-Wextra
+        /clang:-Werror)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    set(RAGE_COMPAT_COMPILE_OPTIONS -fno-strict-aliasing -fwrapv)
+    set(RAGE_WARNING_OPTIONS -Wall -Wextra)
+    set(RAGE_NONFATAL_WARNING_OPTIONS -Wall -Wextra -Wno-error)
+    set(RAGE_STRICT_WARNING_OPTIONS -Wall -Wextra -Werror)
+endif()
+
+# Test fixtures use quote-only shim headers and forced compatibility headers.
+if(MSVC)
+    set(RAGE_QUOTE_INCLUDE_OPTION /clang:-iquote)
+    set(RAGE_FORCE_INCLUDE_OPTION /FI)
+else()
+    set(RAGE_QUOTE_INCLUDE_OPTION -iquote)
+    set(RAGE_FORCE_INCLUDE_OPTION -include)
+endif()
+
+# Link the Visual C++ runtime statically. Windows does not ship it, and an
+# archive that expects the player to install a redistributable first fails
+# before main() with STATUS_DLL_NOT_FOUND and no log to explain why.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY
+        "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # The port intentionally uses the ISO C file APIs shared by every host.
+    # Microsoft's CRT deprecates those names unless the application explicitly
+    # opts into the portable interface.
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
+
+if(NOT ANDROID)
+    include(CTest)
+endif()
+
+option(RAGE_BUILD_PORT "Build the native Rage Racer port" ON)
+option(RAGE_ENABLE_SANITIZERS "Build host targets with ASan and UBSan" OFF)
+option(RAGE_ENABLE_LINT "Expose the host-code lint target" ON)
+set(RAGE_RUNTIME_DISC "" CACHE FILEPATH
+    "Retail CUE/BIN/CHD used by optional native runtime tests")
+
+# clang-tidy needs the exact per-file compile commands.  The setting is a
+# no-op for generators that do not support a compilation database.
+if(RAGE_ENABLE_LINT)
+    if(CMAKE_GENERATOR MATCHES "Ninja|Makefiles")
+        set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+        find_program(RAGE_CLANG_TIDY_EXECUTABLE clang-tidy)
+        find_program(RAGE_CPPCHECK_EXECUTABLE cppcheck)
+        if(RAGE_CLANG_TIDY_EXECUTABLE AND RAGE_CPPCHECK_EXECUTABLE)
+            add_custom_target(lint
+                COMMAND ${CMAKE_COMMAND}
+                    -DBUILD_DIR=${CMAKE_BINARY_DIR}
+                    -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/run_lint.cmake
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                COMMENT "Linting native port and renderer code")
+        else()
+            message(STATUS "Lint target disabled: clang-tidy and cppcheck are required")
+        endif()
+    else()
+        message(STATUS "Lint target disabled: generator has no compilation database")
+    endif()
+endif()
+
+# Deterministic gameplay helpers with no renderer, platform or PSY-Z link.
+# Keeping this target usable when RAGE_BUILD_PORT=OFF gives unit tests a real
+# simulation boundary instead of compiling selected game files ad hoc.
+set(RAGE_SIM_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main/PAL/main/race/time_conversion.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main/PAL/main/random/random.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main/PAL/main/car/angle_math.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main/PAL/main/track/blend_angle.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main/PAL/main/track/interpolate_track_angle.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main/PAL/main/track/interpolate_track_point.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main/PAL/main/track/smooth_track_angle.c
+)
+add_library(rage-sim STATIC ${RAGE_SIM_SOURCES})
+target_include_directories(rage-sim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(rage-sim PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+
+add_library(rage-content STATIC src/content/wav.c src/content/title_image.c src/content/region_profile.c src/content/track_pack.c src/content/sha256.c)
+target_include_directories(rage-content PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(MSVC)
+    target_compile_options(rage-content PRIVATE /W4 /WX)
+else()
+    target_compile_options(rage-content PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_library(rage-car-catalog STATIC src/content/car_catalog.c)
+target_include_directories(rage-car-catalog PUBLIC src src/port/include include external/psyz/psyz/include)
+target_compile_definitions(rage-car-catalog PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(rage-car-catalog PRIVATE /W4 /WX)
+else()
+    target_compile_options(rage-car-catalog PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+
+add_library(rage-json STATIC external/yyjson/yyjson.c)
+target_include_directories(rage-json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/external/yyjson)
+target_sources(rage-content PRIVATE src/content/active_build.c
+    src/content/car_bank.c)
+target_link_libraries(rage-content PRIVATE rage-json rage-car-catalog)
+target_compile_definitions(rage-content PRIVATE __psyz=1)
+add_library(rage-mod-package STATIC src/render/mod_package.c)
+target_include_directories(rage-mod-package PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(rage-mod-package PRIVATE rage-json)
+if(MSVC)
+    target_compile_options(rage-mod-package PRIVATE /W4 /WX)
+else()
+    target_compile_options(rage-mod-package PRIVATE -Wall -Wextra -Werror)
+endif()
+
+add_library(rage-rmesh STATIC
+    src/render/asset_id.c
+    src/render/car_paint.c
+    src/render/authored_car_surface.c
+    src/render/mod_manifest.c
+    src/render/mod_selection.c
+    src/render/mod_provider.c
+    src/render/mod_file_snapshot.c
+    src/render/mod_file_policy.c
+    src/render/asset_path.c
+    src/render/render_material.c
+    src/render/texture_mipmap.c
+    src/render/rmesh.c
+    src/render/rmesh_replace.c
+    src/render/rmesh_index.c
+    src/render/rmesh_cache.c)
+target_include_directories(rage-rmesh PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(rage-content PRIVATE rage-rmesh)
+add_executable(rage-mesh-obj tools/rage_mesh_obj.c tools/gltf.c)
+target_link_libraries(rage-mesh-obj PRIVATE rage-rmesh rage-json SDL3::SDL3)
+set(RAGE_HAS_AUTHORED_CARS 0)
+option(RAGE_EMBED_AUTHORED_CARS "Embed optional local authored car models" ON)
+if(RAGE_EMBED_AUTHORED_CARS AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/cars/erriso-body.obj")
+set(RAGE_HAS_AUTHORED_CARS 1)
+set(RAGE_AUTHORED_DIR "${CMAKE_CURRENT_BINARY_DIR}/authored-cars")
+file(MAKE_DIRECTORY "${RAGE_AUTHORED_DIR}")
+add_custom_command(OUTPUT "${RAGE_AUTHORED_DIR}/erriso_body.inc"
+    COMMAND rage-mesh-obj import "${CMAKE_CURRENT_SOURCE_DIR}/assets/cars/erriso-body.obj"
+        "${RAGE_AUTHORED_DIR}/erriso-body.rmesh"
+    COMMAND ${CMAKE_COMMAND} "-DINPUT=${RAGE_AUTHORED_DIR}/erriso-body.rmesh"
+        "-DOUTPUT=${RAGE_AUTHORED_DIR}/erriso_body.inc"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/scripts/embed_car_mesh.cmake"
+    DEPENDS rage-mesh-obj assets/cars/erriso-body.obj tools/scripts/embed_car_mesh.cmake
+    VERBATIM)
+add_custom_command(OUTPUT "${RAGE_AUTHORED_DIR}/erriso_rival.inc"
+    COMMAND rage-mesh-obj import "${CMAKE_CURRENT_SOURCE_DIR}/assets/cars/erriso-rival.obj"
+        "${RAGE_AUTHORED_DIR}/erriso-rival.rmesh"
+    COMMAND ${CMAKE_COMMAND} "-DINPUT=${RAGE_AUTHORED_DIR}/erriso-rival.rmesh"
+        "-DOUTPUT=${RAGE_AUTHORED_DIR}/erriso_rival.inc" -DSYMBOL=s_errisoRivalBody
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/scripts/embed_car_mesh.cmake"
+    DEPENDS rage-mesh-obj assets/cars/erriso-rival.obj tools/scripts/embed_car_mesh.cmake
+    VERBATIM)
+set(RAGE_AUTHORED_OTHER_OUTPUTS)
+foreach(car erriso abeille pegase esperanza acceron bayonet hijack fatalita istante ghepardo vainqure bulshade squaldon compacta compactb compactc)
+set(variants body rival)
+if(car STREQUAL "erriso")
+    set(variants)
+elseif(car MATCHES "^compact")
+    set(variants rival-early rival-middle rival-late)
+elseif(car STREQUAL "esperanza")
+    list(APPEND variants rival-late rival-duplicate rival-slot1 rival-slot2)
+elseif(car STREQUAL "hijack" OR car STREQUAL "bulshade")
+    list(APPEND variants rival-alternate)
+endif()
+if(car STREQUAL "erriso" OR car STREQUAL "acceron")
+    list(APPEND variants grade1 grade2 grade3)
+elseif(car STREQUAL "abeille" OR car STREQUAL "bayonet" OR car STREQUAL "fatalita")
+    list(APPEND variants grade1 grade2)
+elseif(car STREQUAL "pegase" OR car STREQUAL "hijack" OR car STREQUAL "istante")
+    list(APPEND variants grade1)
+elseif(car STREQUAL "esperanza")
+    list(APPEND variants grade1 grade2 grade3 grade4 rounded)
+    foreach(wheel RANGE 2 21)
+        list(APPEND variants wheel${wheel})
+    endforeach()
+endif()
+foreach(variant IN LISTS variants)
+    string(REPLACE "-" "_" symbol "${car}_${variant}")
+    list(APPEND RAGE_AUTHORED_OTHER_OUTPUTS "${RAGE_AUTHORED_DIR}/${symbol}.inc")
+    add_custom_command(OUTPUT "${RAGE_AUTHORED_DIR}/${symbol}.inc"
+        COMMAND rage-mesh-obj import "${CMAKE_CURRENT_SOURCE_DIR}/assets/cars/${car}-${variant}.obj"
+            "${RAGE_AUTHORED_DIR}/${car}-${variant}.rmesh"
+        COMMAND ${CMAKE_COMMAND} "-DINPUT=${RAGE_AUTHORED_DIR}/${car}-${variant}.rmesh"
+            "-DOUTPUT=${RAGE_AUTHORED_DIR}/${symbol}.inc" "-DSYMBOL=s_${symbol}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/scripts/embed_car_mesh.cmake"
+        DEPENDS rage-mesh-obj "assets/cars/${car}-${variant}.obj" tools/scripts/embed_car_mesh.cmake
+        VERBATIM)
+endforeach()
+endforeach()
+file(GLOB RAGE_ROUNDED_CAR_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/cars/rounded/*.obj")
+foreach(source IN LISTS RAGE_ROUNDED_CAR_SOURCES)
+    get_filename_component(stem "${source}" NAME_WE)
+    string(REPLACE "-" "_" symbol "rounded_${stem}")
+    list(APPEND RAGE_AUTHORED_OTHER_OUTPUTS "${RAGE_AUTHORED_DIR}/${symbol}.inc")
+    add_custom_command(OUTPUT "${RAGE_AUTHORED_DIR}/${symbol}.inc"
+        COMMAND rage-mesh-obj import "${source}" "${RAGE_AUTHORED_DIR}/${symbol}.rmesh"
+        COMMAND ${CMAKE_COMMAND} "-DINPUT=${RAGE_AUTHORED_DIR}/${symbol}.rmesh"
+            "-DOUTPUT=${RAGE_AUTHORED_DIR}/${symbol}.inc" "-DSYMBOL=s_${symbol}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/scripts/embed_car_mesh.cmake"
+        DEPENDS rage-mesh-obj "${source}" tools/scripts/embed_car_mesh.cmake
+        VERBATIM)
+endforeach()
+add_custom_target(rage-authored-cars DEPENDS "${RAGE_AUTHORED_DIR}/erriso_body.inc"
+    "${RAGE_AUTHORED_DIR}/erriso_rival.inc" ${RAGE_AUTHORED_OTHER_OUTPUTS})
+include_directories("${RAGE_AUTHORED_DIR}")
+else()
+    # Authored replacement meshes are distributed separately. A public source
+    # checkout still builds and uses the cars imported from the player's disc.
+    add_custom_target(rage-authored-cars)
+endif()
+add_compile_definitions(RAGE_HAS_AUTHORED_CARS=${RAGE_HAS_AUTHORED_CARS})
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(rage-mesh-obj PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+if(NOT MSVC)
+    target_link_libraries(rage-rmesh PUBLIC m)
+endif()
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(rage-rmesh PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+
+add_library(rage-render-world STATIC
+    src/render/car_lights.c
+    src/render/car_lamps.c
+    src/render/render_world.c
+    src/render/render_world_frame.c
+    src/render/render_world_snapshot.c
+    src/render/render_projection.c
+    src/render/render_stage.c
+    src/render/render_shadow.c
+    src/render/render_mesh_build.c
+    src/render/render_geometry_pack.c)
+target_include_directories(rage-render-world PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(NOT MSVC)
+    target_link_libraries(rage-render-world PUBLIC m)
+endif()
+target_link_libraries(rage-render-world PUBLIC rage-rmesh)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(rage-render-world PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+
+add_library(rage-ray STATIC
+    src/render/ray/ray.c
+    src/render/ray/ray_bvh.c
+    src/render/ray/ray_draws.c
+    src/render/ray/ray_gpu.c
+    src/render/ray/ray_mesh_import.c
+    src/render/ray/ray_scene.c
+    src/render/ray/ray_world.c)
+target_include_directories(rage-ray PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(NOT MSVC)
+    target_link_libraries(rage-ray PUBLIC m)
+endif()
+target_link_libraries(rage-ray PUBLIC rage-rmesh)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(rage-ray PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+
+if(RAGE_BUILD_PORT)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(CHDR_WANT_TESTS OFF CACHE BOOL "" FORCE)
+    set(CHDR_WANT_SUBCODE OFF CACHE BOOL "" FORCE)
+    add_subdirectory(external/libchdr external-libchdr)
+    target_include_directories(miniz PUBLIC
+        external/libchdr/deps/miniz-3.1.2)
+    add_subdirectory(external/psyz/psyz external-psyz)
+
+    file(GLOB_RECURSE RAGE_GAME_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/main/PAL/main/*.c"
+    )
+    list(REMOVE_ITEM RAGE_GAME_SOURCES ${RAGE_SIM_SOURCES})
+
+    add_library(rage-game-full OBJECT
+        ${RAGE_GAME_SOURCES}
+        src/port/native_game_state.c
+        src/port/native_handler_tables.c)
+    add_library(rage-host-state OBJECT
+        ${RAGE_HOST_STATE_SOURCES}
+        src/port/native_initialized_state.c
+    )
+    # Retail state is defined with the types its headers declare, so this
+    # needs the s32/u16 family the rest of the tree is written in.
+    target_include_directories(rage-host-state PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    # The retail game and its host-state bridge intentionally preserve signed
+    # wrapping and type-punned PS1 storage. New renderer and mod code must not
+    # inherit those relaxed assumptions.
+    target_compile_options(rage-game-full PRIVATE ${RAGE_COMPAT_COMPILE_OPTIONS})
+    target_compile_options(rage-host-state PRIVATE ${RAGE_COMPAT_COMPILE_OPTIONS})
+    set(RAGE_PORT_COMMON_SOURCES
+        # Compiled per executable: RAGE_SMOKE_TARGET controls its hook fallback
+        # and hook order. A shared object loses that definition on Windows.
+        src/port/platform_stubs.c
+        src/port/disc_picker.c
+        src/port/disc_stream_publish.c
+        src/port/input_config.c
+        src/port/input_device_select.c
+        src/port/platform_paths.c
+        src/port/menu_music_asset.c
+        src/port/menu_music_render.c
+        src/port/menu_music_runtime.c
+        src/port/diagnostic_log.c
+        src/port/game_diagnostics.c
+        src/port/render_world_game.c
+        src/port/render_world_scene.c
+        src/port/sky_panorama_layout.c
+        src/port/track_asset_identity.c
+        src/port/track_lighting.c
+        src/port/runtime_config.c
+        src/port/runtime_parse.c
+        src/port/timing_control.c
+        src/port/analog_pad.c
+        src/port/force_feedback.c
+        src/port/force_feedback_device.c
+        src/port/axis_curve.c
+        src/port/timing_restore.c
+        src/port/chase_camera.c
+        src/port/content_options.c
+        src/port/car_catalog_profile.c
+        src/port/car_catalog.c
+        src/port/chd_disc.c
+        src/port/chd_track_layout.c
+        src/port/disc_stream_table.c
+        src/port/hud_config.c
+        src/port/speed_display.c
+        src/port/mod_assets.c
+        src/port/menu_images.c
+        src/port/menu_label_font.c
+        src/port/texture_patch.c
+        src/port/port_config.c
+        src/port/scenario_control.c
+        src/port/debug_autopilot.c
+        src/port/debug_route.c
+        src/port/native_visibility.c
+        src/port/native_asset_importer.c
+        src/port/track_export.c
+        src/port/car_export.c
+        src/port/native_mesh_writer.c
+        src/port/track_texture_snapshot.c
+        src/port/modern/modern_renderer.c
+        src/port/modern/modern_fmv_zoom.c
+        src/port/modern/modern_presentation_clock.c
+        src/port/modern/modern_sky_reprojection.c
+        src/port/modern/modern_overlay_state.c
+        src/port/modern/modern_overlay_batches.c
+        src/port/modern/modern_vram_snapshot.c
+        src/port/modern/modern_assets.c
+        src/port/modern/modern_prepared_materials.c
+        src/port/modern/modern_prepared_meshes.c
+        src/port/modern/modern_texture_index.c
+        src/port/modern/modern_depth_probe.c
+        src/port/modern/modern_material_uniform.c
+        src/port/modern/modern_png.c
+        src/port/modern/modern_native_gpu.c
+        src/port/modern/modern_ray_gpu.c
+        src/port/modern/modern_shader_sources.c
+        src/port/modern/modern_texture_dump.c
+        src/port/modern/modern_renderer_diagnostics.c
+        src/port/modern/scene_capture.c
+        src/port/classic_motion.c
+    )
+    set(RAGE_PORT_LEGACY_SOURCES
+        src/port/host_disc.c
+        src/port/archive_index.c
+        src/port/bios_file.c
+        src/port/cdda_file.c
+        src/port/disc_cue.c
+        src/port/disc_discovery.c
+        src/port/disc_iso.c
+        src/port/disc_raw_file.c
+        src/port/gte_matrix_compat.c
+        src/port/host_storage.c
+        src/port/spu_vm_flush.c
+        src/port/classic/native_geometry.c
+        src/port/native_geometry_interpolation.c
+        src/port/native_asset_loader.c
+        src/port/fmv_audio.c
+        src/port/fmv_str.c
+        src/port/fmv_stream_index.c
+        src/port/fmv_host.c
+        src/port/fmv_zoom.c
+    )
+    add_library(rage-port-legacy OBJECT ${RAGE_PORT_LEGACY_SOURCES})
+    target_include_directories(rage-port-legacy PRIVATE src/port/include include)
+    target_link_libraries(rage-port-legacy PRIVATE psyz rage-content)
+    target_compile_options(rage-port-legacy PRIVATE ${RAGE_COMPAT_COMPILE_OPTIONS})
+    if(ANDROID)
+        add_library(main SHARED
+            src/port/main.c
+            src/port/android_touch.c
+            src/port/runtime_control.c
+            ${RAGE_PORT_COMMON_SOURCES}
+            $<TARGET_OBJECTS:rage-port-legacy>
+            $<TARGET_OBJECTS:rage-game-full>
+            $<TARGET_OBJECTS:rage-host-state>
+        )
+        add_custom_target(rage-racer DEPENDS main)
+    else()
+        add_executable(rage-racer
+            MACOSX_BUNDLE
+            src/port/main.c
+            src/port/runtime_control.c
+            ${RAGE_PORT_COMMON_SOURCES}
+            $<TARGET_OBJECTS:rage-port-legacy>
+            $<TARGET_OBJECTS:rage-game-full>
+            $<TARGET_OBJECTS:rage-host-state>
+        )
+        add_executable(rage-racer-smoke
+            src/port/main_smoke.c
+            src/port/smoke_control.c
+            ${RAGE_PORT_COMMON_SOURCES}
+            $<TARGET_OBJECTS:rage-port-legacy>
+            $<TARGET_OBJECTS:rage-game-full>
+            $<TARGET_OBJECTS:rage-host-state>
+        )
+        target_compile_definitions(rage-racer-smoke PRIVATE RAGE_SMOKE_TARGET=1)
+    endif()
+    if(NOT ANDROID)
+    add_executable(rage-extract tools/rage_extract.c
+        src/port/menu_music_asset.c
+        src/port/menu_music_render.c)
+    target_include_directories(rage-extract PRIVATE src/port)
+    target_link_libraries(rage-extract PRIVATE psyz)
+    add_executable(rage-menu-texture tools/rage_menu_texture.c)
+    target_include_directories(rage-menu-texture PRIVATE src)
+    target_link_libraries(rage-menu-texture PRIVATE psyz)
+    if(MSVC)
+        target_compile_options(rage-extract PRIVATE /W4 /WX)
+    else()
+        target_compile_options(rage-extract PRIVATE
+            ${RAGE_STRICT_WARNING_OPTIONS})
+    endif()
+    add_executable(rage-stage-discs tools/rage_stage_discs.c
+        src/port/disc_stage_validation.c
+        src/port/disc_cue.c
+        src/port/disc_iso.c)
+    target_include_directories(rage-stage-discs PRIVATE src/port)
+    target_compile_definitions(rage-stage-discs PRIVATE
+        RAGE_STAGE_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+    if(MSVC)
+        target_compile_options(rage-stage-discs PRIVATE /W4 /WX)
+        target_compile_definitions(rage-stage-discs PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(rage-stage-discs PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+    endif()
+    add_executable(rage-pcm-check tools/rage_pcm_check.c src/port/pcm_metrics.c)
+    add_executable(rage-fmv-pacing-check tools/rage_fmv_pacing_check.c
+        src/port/disc_raw_file.c src/port/disc_cue.c src/port/disc_iso.c
+        src/port/disc_stream_table.c)
+    target_include_directories(rage-fmv-pacing-check PRIVATE src/port)
+    target_link_libraries(rage-fmv-pacing-check PRIVATE rage-content)
+    if(MSVC)
+        target_compile_options(rage-fmv-pacing-check PRIVATE /W4 /WX)
+        target_compile_definitions(rage-fmv-pacing-check PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(rage-fmv-pacing-check PRIVATE -Wall -Wextra -Werror)
+    endif()
+    target_include_directories(rage-pcm-check PRIVATE src/port)
+    if(MSVC)
+        target_compile_options(rage-pcm-check PRIVATE /W4 /WX)
+        target_compile_definitions(rage-pcm-check PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(rage-pcm-check PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_executable(rage-pack tools/rage_pack.c src/port/texture_patch.c)
+    target_include_directories(rage-pack PRIVATE src/port)
+    target_link_libraries(rage-pack PRIVATE miniz rage-json)
+    add_executable(rage-save-generator tools/rage_save_generator.c)
+    add_executable(rage-scenario tools/rage_scenario.c)
+    target_link_libraries(rage-scenario PRIVATE SDL3::SDL3)
+    if(MSVC)
+        target_compile_options(rage-scenario PRIVATE /W4 /WX)
+    else()
+        target_compile_options(rage-scenario PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+    endif()
+    add_library(rage-save-format STATIC launcher/native/save/rage_save.c)
+    target_compile_definitions(rage-save-format PUBLIC __psyz=1)
+    target_include_directories(rage-save-format PUBLIC
+        launcher/native/save src/port/include include external/psyz/psyz/include)
+    add_executable(rage-save-cli launcher/native/save_cli.c)
+    target_link_libraries(rage-save-cli PRIVATE rage-save-format)
+    target_link_libraries(rage-save-cli PRIVATE SDL3::SDL3)
+    add_executable(rage-mod-cli launcher/native/mod_cli.c src/port/platform_paths.c)
+    target_compile_definitions(rage-mod-cli PRIVATE __psyz=1)
+    target_include_directories(rage-mod-cli PRIVATE
+        src src/port/include include external/psyz/psyz/include)
+    target_link_libraries(rage-mod-cli PRIVATE rage-render-world rage-mod-package rage-json rage-content rage-car-catalog SDL3::SDL3)
+    add_executable(rage-studio-mcp launcher/native/studio_mcp.c src/port/platform_paths.c)
+    target_compile_definitions(rage-studio-mcp PRIVATE __psyz=1)
+    target_include_directories(rage-studio-mcp PRIVATE
+        src src/port/include include external/psyz/psyz/include)
+    target_link_libraries(rage-studio-mcp PRIVATE rage-json rage-content rage-car-catalog SDL3::SDL3)
+    if(WIN32)
+        target_link_libraries(rage-studio-mcp PRIVATE ws2_32)
+    else()
+        target_link_libraries(rage-studio-mcp PRIVATE m)
+    endif()
+    add_executable(rage-frame-replay
+        tools/rage_frame_replay.c
+        src/port/platform_paths.c
+        src/port/runtime_config.c
+        src/port/runtime_parse.c
+        src/port/mod_assets.c
+        src/port/texture_patch.c
+        src/port/track_asset_identity.c
+        src/port/sky_panorama_layout.c
+        src/port/native_asset_importer_stubs.c
+        src/port/modern/modern_assets.c
+        src/port/modern/modern_prepared_materials.c
+        src/port/modern/modern_prepared_meshes.c
+        src/port/modern/modern_texture_index.c
+        src/port/modern/modern_depth_probe.c
+        src/port/modern/modern_material_uniform.c
+        src/port/modern/modern_png.c
+        src/port/modern/modern_native_gpu.c
+        src/port/modern/modern_ray_gpu.c
+        src/port/modern/modern_texture_dump.c)
+    add_executable(rage-render-stage
+        tools/rage_render_stage.c
+        src/port/platform_paths.c
+        src/port/runtime_config.c
+        src/port/runtime_parse.c
+        src/port/mod_assets.c
+        src/port/texture_patch.c
+        src/port/track_asset_identity.c
+        src/port/sky_panorama_layout.c
+        src/port/native_asset_importer_stubs.c
+        src/port/modern/modern_assets.c
+        src/port/modern/modern_prepared_materials.c
+        src/port/modern/modern_prepared_meshes.c
+        src/port/modern/modern_texture_index.c
+        src/port/modern/modern_depth_probe.c
+        src/port/modern/modern_material_uniform.c
+        src/port/modern/modern_png.c
+        src/port/modern/modern_native_gpu.c
+        src/port/modern/modern_ray_gpu.c
+        src/port/modern/modern_texture_dump.c)
+    target_include_directories(rage-render-stage PRIVATE
+        src src/port src/port/include include)
+    add_dependencies(rage-render-stage rage-authored-cars)
+    add_dependencies(rage-frame-replay rage-authored-cars)
+    target_link_libraries(rage-render-stage PRIVATE
+        rage-content rage-render-world rage-ray SDL3::SDL3 miniz rage-json)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(rage-render-stage PRIVATE
+            ${RAGE_STRICT_WARNING_OPTIONS})
+    endif()
+    target_include_directories(rage-frame-replay PRIVATE
+        src src/port src/port/include include)
+    target_link_libraries(rage-frame-replay PRIVATE
+        rage-content
+        rage-render-world rage-ray SDL3::SDL3 miniz rage-json)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(rage-frame-replay PRIVATE
+            ${RAGE_STRICT_WARNING_OPTIONS})
+    endif()
+    target_compile_definitions(rage-save-generator PRIVATE __psyz=1)
+    if(MSVC)
+        target_include_directories(rage-save-generator PRIVATE
+            src/port/include include)
+    else()
+        target_compile_options(rage-save-generator PRIVATE
+            "-iquote${CMAKE_CURRENT_SOURCE_DIR}/src/port/include"
+            "-iquote${CMAKE_CURRENT_SOURCE_DIR}/include")
+    endif()
+    endif() # NOT ANDROID
+    target_include_directories(rage-game-full PRIVATE
+        src/port
+        src/port/include
+        include
+    )
+    target_link_libraries(rage-game-full PUBLIC psyz rage-content rage-car-catalog)
+    # The recovered game sources retain PS1-era tentative globals.  Host
+    # initialized state deliberately provides their concrete definitions; GCC
+    # otherwise treats the tentative copies as duplicate ELF definitions.
+    if(NOT WIN32 AND
+       (CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
+        CMAKE_C_COMPILER_ID MATCHES "Clang"))
+        target_compile_options(rage-game-full PRIVATE
+            -fcommon -Wall -Wextra -Werror)
+        if(APPLE AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+            target_compile_options(rage-game-full PRIVATE
+                -Wno-error)
+        endif()
+    elseif(WIN32 AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+        target_compile_options(rage-game-full PRIVATE /clang:-fcommon)
+    endif()
+    if(ANDROID)
+        set(RAGE_PORT_TARGETS main)
+    else()
+        set(RAGE_PORT_TARGETS rage-racer rage-racer-smoke)
+    endif()
+    foreach(RAGE_PORT_TARGET ${RAGE_PORT_TARGETS})
+        add_dependencies(${RAGE_PORT_TARGET} rage-authored-cars)
+        target_include_directories(${RAGE_PORT_TARGET} PRIVATE
+            src/port/include
+            include
+        )
+        if(NOT WIN32)
+            target_compile_options(${RAGE_PORT_TARGET} PRIVATE
+                "-iquote${CMAKE_CURRENT_SOURCE_DIR}/src/port/include"
+                "-iquote${CMAKE_CURRENT_SOURCE_DIR}/include"
+                -Wall -Wextra -Werror
+            )
+            # Apple Clang 16 diagnoses the recovered PS1-era declarations
+            # without prototypes. Keep the diagnostics visible while the
+            # legacy headers are incrementally typed, but do not fail release
+            # builds solely on this compatibility warning.
+            if(APPLE AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+                target_compile_options(${RAGE_PORT_TARGET} PRIVATE
+                    -Wno-error=deprecated-non-prototype)
+            endif()
+        endif()
+        target_link_libraries(${RAGE_PORT_TARGET} PRIVATE
+            rage-sim psyz rage-render-world rage-ray rage-content rage-car-catalog chdr-static miniz rage-json)
+        if(WIN32)
+            target_link_libraries(${RAGE_PORT_TARGET} PRIVATE comdlg32 legacy_stdio_definitions)
+        endif()
+        if(ANDROID)
+            target_link_libraries(${RAGE_PORT_TARGET} PRIVATE android log c++_static)
+            set_target_properties(${RAGE_PORT_TARGET} PROPERTIES LINKER_LANGUAGE CXX)
+        endif()
+    endforeach()
+    if(RAGE_ENABLE_SANITIZERS AND
+       CMAKE_C_COMPILER_ID MATCHES "Clang|GNU" AND NOT WIN32)
+        foreach(RAGE_SANITIZER_TARGET rage-game-full rage-host-state rage-port-legacy
+                                      rage-racer rage-racer-smoke rage-sim rage-content rage-car-catalog
+                                      rage-mod-package rage-rmesh rage-render-world rage-ray)
+            target_compile_options(${RAGE_SANITIZER_TARGET} PRIVATE
+                -fsanitize=address,undefined -fno-omit-frame-pointer)
+        endforeach()
+        # Instrument the native renderer/asset libraries too. Their tools and
+        # tests need the runtime even when they do not link a game executable.
+        foreach(RAGE_SANITIZER_TARGET rage-sim rage-content rage-car-catalog rage-mod-package
+                                      rage-rmesh rage-render-world rage-ray)
+            target_link_options(${RAGE_SANITIZER_TARGET} INTERFACE
+                -fsanitize=address,undefined)
+        endforeach()
+        foreach(RAGE_SANITIZER_TARGET rage-racer rage-racer-smoke)
+            target_link_options(${RAGE_SANITIZER_TARGET} PRIVATE
+                -fsanitize=address,undefined)
+        endforeach()
+    endif()
+    if(MSVC)
+        target_compile_options(rage-game-full PRIVATE
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/port/include/rage/compat.h"
+        )
+    else()
+        target_compile_options(rage-game-full PRIVATE
+            "-include${CMAKE_CURRENT_SOURCE_DIR}/src/port/include/rage/compat.h"
+        )
+    endif()
+    target_compile_definitions(psyz PRIVATE
+        PSYZ_TITLE="Rage Racer"
+        DEFAULT_FRONT_W=640
+        DEFAULT_FRONT_H=480
+    )
+    if(MSVC)
+        # PsyZ is vendored third-party code; keep its published C11 contract.
+        set_property(TARGET psyz PROPERTY C_STANDARD 11)
+        set_property(TARGET psyz PROPERTY C_STANDARD_REQUIRED ON)
+        target_compile_options(psyz PRIVATE "$<$<COMPILE_LANGUAGE:C>:/std:c11>")
+        foreach(RAGE_MSVC_TARGET rage-game-full rage-host-state rage-port-legacy)
+            target_compile_options(${RAGE_MSVC_TARGET} PRIVATE
+                "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/port/include/rage/msvc_compat.h"
+            )
+        endforeach()
+    endif()
+    if(APPLE)
+        set(RAGE_MACOS_ICON
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/RageRacer.icns")
+        set_source_files_properties("${RAGE_MACOS_ICON}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION Resources)
+        set(RAGE_MACOS_DEFAULT_CONFIG
+            "${CMAKE_CURRENT_SOURCE_DIR}/rage-port.ini")
+        set_source_files_properties("${RAGE_MACOS_DEFAULT_CONFIG}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION Resources)
+        set(RAGE_MACOS_CAR_CATALOG
+            "${CMAKE_CURRENT_SOURCE_DIR}/cars.toml"
+            "${CMAKE_CURRENT_SOURCE_DIR}/cars.ntscj.toml")
+        set_source_files_properties(${RAGE_MACOS_CAR_CATALOG} PROPERTIES
+            MACOSX_PACKAGE_LOCATION Resources)
+        target_sources(rage-racer PRIVATE
+            "${RAGE_MACOS_ICON}"
+            "${RAGE_MACOS_DEFAULT_CONFIG}"
+            ${RAGE_MACOS_CAR_CATALOG})
+        target_link_libraries(rage-racer PRIVATE "-framework CoreFoundation")
+        set_target_properties(rage-racer PROPERTIES
+            OUTPUT_NAME "Rage Racer"
+            MACOSX_BUNDLE_BUNDLE_NAME "Rage Racer"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "com.khasinski.rage-racer"
+            MACOSX_BUNDLE_BUNDLE_VERSION "${RAGE_RACER_RELEASE_VERSION}"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "${RAGE_RACER_RELEASE_VERSION}"
+            MACOSX_BUNDLE_ICON_FILE "RageRacer.icns"
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/Info.plist.in"
+        )
+
+        # Older build trees contain a standalone `rage-racer` left behind
+        # from before this target became a macOS application bundle.  That
+        # executable is not updated by the bundle target and can silently run
+        # stale game, renderer and audio code.  Keep the familiar developer
+        # path, but make it resolve to the executable CMake actually builds.
+        set(RAGE_MACOS_BUILD_LAUNCHER
+            "${CMAKE_CURRENT_BINARY_DIR}/rage-racer")
+        file(REMOVE "${RAGE_MACOS_BUILD_LAUNCHER}")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E create_symlink
+                "Rage Racer.app/Contents/MacOS/Rage Racer"
+                "${RAGE_MACOS_BUILD_LAUNCHER}"
+            COMMAND_ERROR_IS_FATAL ANY
+        )
+    endif()
+    if(WIN32)
+        target_sources(rage-racer PRIVATE
+            packaging/windows/rage-racer.rc)
+        # Electron passes Unicode paths; native argv and narrow filesystem APIs
+        # must use the same UTF-8 encoding (Windows 10 1903 or newer).
+        if(MSVC)
+            foreach(target rage-racer rage-extract rage-pack rage-save-generator
+                           rage-save-cli rage-mod-cli rage-mesh-obj)
+                target_sources(${target} PRIVATE packaging/windows/utf8.manifest)
+            endforeach()
+        endif()
+    endif()
+    if(BUILD_TESTING AND NOT ANDROID)
+        add_test(NAME rage_stage_discs_cli COMMAND rage-stage-discs)
+        set_tests_properties(rage_stage_discs_cli PROPERTIES LABELS tooling
+            WILL_FAIL TRUE)
+        add_test(NAME rage_scenario_cli
+            COMMAND rage-scenario ${CMAKE_SOURCE_DIR}/race-scenario.ini
+                --binary $<TARGET_FILE:rage-racer> --class 4 --course 3 --car 12
+                --grid 0,1,2,3,4,5,6,7,8,9,10 --start-point 42
+                --rival-points 1,-,3 --dry-run)
+        set_tests_properties(rage_scenario_cli PROPERTIES LABELS tooling
+            PASS_REGULAR_EXPRESSION "class=4 course=3 car=12")
+        add_test(NAME rage_scenario_rejects_bad_grid
+            COMMAND rage-scenario ${CMAKE_SOURCE_DIR}/race-scenario.ini
+                --binary $<TARGET_FILE:rage-racer> --grid 0,1 --dry-run)
+        set_tests_properties(rage_scenario_rejects_bad_grid PROPERTIES
+            LABELS tooling WILL_FAIL TRUE)
+        add_executable(rage-save-format-tests launcher/tests/rage_save_tests.c
+            src/main/PAL/main/save/save_checksum.c)
+        target_link_libraries(rage-save-format-tests PRIVATE rage-save-format SDL3::SDL3)
+        if(MSVC)
+            target_compile_options(rage-save-format-tests PRIVATE
+                "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+        else()
+            target_compile_options(rage-save-format-tests PRIVATE
+                "-include${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+        endif()
+        add_test(NAME save_format COMMAND rage-save-format-tests)
+        set_tests_properties(save_format PROPERTIES LABELS tooling)
+        add_executable(rage-gte-replay tools/rage_gte_replay.c)
+        target_link_libraries(rage-gte-replay PRIVATE psyz)
+        add_executable(rage-gp0-replay tools/rage_gp0_replay.c)
+        target_link_libraries(rage-gp0-replay PRIVATE psyz)
+        add_test(NAME save_generator
+            COMMAND rage-save-generator --self-test)
+        set_tests_properties(save_generator PROPERTIES LABELS functional)
+        if(RAGE_RUNTIME_DISC)
+            add_test(NAME attract_runtime
+                COMMAND "${CMAKE_COMMAND}" -E env
+                    "SDL_AUDIODRIVER=dummy"
+                    "RAGE_PORT_DISC_CUE=${RAGE_RUNTIME_DISC}"
+                    $<TARGET_FILE:rage-racer-smoke>
+                    --set video.renderer=modern
+                    --set race.enabled=false
+                    --set boot.direct=false
+                    --set run.frames=3500
+                    --set stop.scene=30
+                    --set stop.timer=400
+                    --set diagnostics.log=stderr)
+            set_tests_properties(attract_runtime PROPERTIES
+                LABELS "retail;runtime"
+                TIMEOUT 180)
+        endif()
+    endif()
+endif()
+
+if(BUILD_TESTING AND NOT ANDROID)
+    add_subdirectory(tests)
+    # CTest registers all unit executables during configuration. Building only
+    # the game leaves those registrations intact but reports their missing
+    # binaries as Not Run. Keep the complete build coupled to this convenient
+    # unit gate so local and CI results mean the same thing.
+    add_custom_target(check-unit
+        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target all
+        COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR}
+            -L unit --output-on-failure
+        USES_TERMINAL
+        COMMENT "Building all targets and running unit tests")
+endif()

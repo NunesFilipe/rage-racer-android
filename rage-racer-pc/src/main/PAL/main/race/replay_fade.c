@@ -1,0 +1,74 @@
+#include "game/audio.h"
+#include "game/cd.h"
+#include "game/race.h"
+#include "game/race_internal.h"
+#include "game/render.h"
+#include "game/replay_internal.h"
+#include "game/scene.h"
+#include "game/state.h"
+
+enum {
+    REPLAY_FADE_STEP = 4,
+    REPLAY_AUDIO_FADE_FRAMES = 60,
+    REPLAY_FADE_IN_TPAGE = 0x29,
+    REPLAY_FADE_OUT_TPAGE = 0x49,
+};
+
+static void StartReplayExitFade(s32 fadeAudio) {
+    g_FadeStep = REPLAY_FADE_STEP;
+    if (fadeAudio != 0) {
+        StartCdVolumeFade(REPLAY_AUDIO_FADE_FRAMES);
+    }
+}
+
+s32 UpdateReplayFade(void) {
+    s32 endingWashActive;
+    s32 sceneChanged = 0;
+
+    if (g_FadeStep < 0) {
+        g_FadeLevel = StepFade(
+            g_FadeLevel, g_FadeStep, REPLAY_OPAQUE_FADE);
+        if (g_FadeLevel == 0) {
+            g_FadeStep = 0;
+            g_Replay.endingWash = 0;
+        }
+        DrawFullscreenFadeTile(g_FadeLevel, REPLAY_FADE_IN_TPAGE);
+        return 0;
+    }
+
+    endingWashActive = g_SeriesCleared != 0 &&
+                       ReplayEndingWashActive(g_SceneTimer,
+                                              g_Replay.count);
+    if (endingWashActive) {
+        g_Replay.endingWash = ReplayEndingWashLevel(
+            g_SceneTimer, g_Replay.count);
+    }
+
+    if (g_FadeStep == 0) {
+        if (g_PadPressed & PAD_CONFIRM) {
+            StartReplayExitFade(1);
+        } else if (ShouldStartReplayExitFade(
+                       g_SceneTimer, g_Replay.count)) {
+            StartReplayExitFade(g_Replay.wrapped == 0);
+        }
+    } else {
+        g_FadeLevel = StepFade(
+            g_FadeLevel, g_FadeStep, REPLAY_OPAQUE_FADE);
+        if (g_FadeLevel >= REPLAY_OPAQUE_FADE) {
+            g_MirrorMode = 0;
+            g_SceneId = g_GrandPrixMode == 0
+                ? GAME_SCENE_ENTER_RECORD_ENTRY
+                : GAME_SCENE_ENTER_PRIZE;
+            sceneChanged = 1;
+        }
+    }
+
+    if (g_SeriesCleared != 0) {
+        if (endingWashActive || g_FadeLevel != 0) {
+            DrawSeriesClearedWash(g_Replay.endingWash, g_FadeLevel);
+        }
+    } else if (g_FadeLevel != 0) {
+        DrawFullscreenFadeTile(g_FadeLevel, REPLAY_FADE_OUT_TPAGE);
+    }
+    return sceneChanged;
+}

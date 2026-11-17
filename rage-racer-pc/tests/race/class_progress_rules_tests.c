@@ -1,0 +1,209 @@
+#include "common.h"
+#include "game/prize_money.h"
+#include "game/grand_prix_content.h"
+#include "game/race_internal.h"
+
+#include <stdio.h>
+#include <stdint.h>
+
+static int s_failures;
+
+static void Check(const char *name, s32 actual, s32 expected) {
+    if (actual != expected) {
+        printf("FAIL %s: got %d, expected %d\n", name, actual, expected);
+        s_failures++;
+    }
+}
+
+int main(void) {
+    static const s32 expectedUnlocks[] = {1, 2, 3, 4, 6, -1, 7, 8, 9, 10, 5};
+    static const u8 firstPlace[4] = {1, 1, 1, 1};
+    static const u8 shortFirstPlace[4] = {1, 1, 1, 0xFF};
+    static const u8 missingFourthPlace[4] = {1, 1, 1, 0};
+    static const u8 secondPlace[4] = {1, 1, 1, 2};
+    static const u8 thirdPlace[4] = {1, 1, 1, 3};
+    static const u8 noGrade[4] = {1, 1, 2, 3};
+    ScoreRecord records[CLASS_RECORD_COUNT] = {0};
+    const s32 promotionBonuses[5] = {500, 4800, 20000, 100000, 500000};
+    const s32 prizes[3] = {10000, 5000, 2500};
+    s32 i;
+    Check("negative content index", GrandPrixContentClass(-1) == NULL, 1);
+    Check("past content table", GrandPrixContentClass(6) == NULL, 1);
+    Check("minimum content index", GrandPrixContentClass(INT32_MIN) == NULL, 1);
+    Check("maximum content index", GrandPrixContentClass(INT32_MAX) == NULL, 1);
+    {
+        s32 series = 42;
+        Check("absent record", GrandPrixContentRecord(-1, &series) == NULL, 1);
+        Check("absent record preserves output", series, 42);
+        Check("out of range record", GrandPrixContentRecord(INT32_MAX, &series) == NULL, 1);
+        for (s32 record = 0; record < CLASS_RECORD_COUNT; ++record) {
+            const GrandPrixClassDefinition *definition = GrandPrixContentRecord(record, &series);
+            Check("record lookup found", definition != NULL, 1);
+            if (definition != NULL) Check("record lookup identity", definition->record[series], record);
+            Check("optional series output", GrandPrixContentRecord(record, NULL) == definition, 1);
+        }
+    }
+    for (s32 series = 0; series < 2; ++series) {
+        for (s32 classIndex = 0; classIndex < 6; ++classIndex) {
+            s32 finalClass = series ? 5 : 4;
+            Check("all class asset series", GrandPrixAssetSeries(series, classIndex),
+                  classIndex < 5 ? series : 0);
+            Check("all promotion stream definitions",
+                  GrandPrixContentClass(classIndex)->promotionStream[series],
+                  1 + series * 4 + (classIndex < 4 ? classIndex : 3));
+            Check("all class course counts", GrandPrixCourseCount(classIndex),
+                  classIndex < 2 ? 3 : 4);
+            Check("all record identities", GrandPrixClassRecordIndex(series, classIndex),
+                  series && classIndex == 5 ? -1 : series * 6 + classIndex);
+            Check("all class transitions", NextGrandPrixClassForSeries(series, classIndex),
+                  classIndex < finalClass ? classIndex + 1 : -1);
+            Check("all final flags", IsFinalGrandPrixClass(series, classIndex),
+                  classIndex == finalClass);
+        }
+    }
+    Check("minimum signed race position", PrizeForRacePosition(prizes, 3, INT32_MIN), 0);
+    Check("maximum signed race position", PrizeForRacePosition(prizes, 3, INT32_MAX), 0);
+
+    Check("class 0 courses", GrandPrixCourseCount(0), 3);
+    Check("class 1 courses", GrandPrixCourseCount(1), 3);
+    Check("class 2 courses", GrandPrixCourseCount(2), 4);
+    Check("class 5 courses", GrandPrixCourseCount(5), 4);
+    Check("invalid class has no courses", GrandPrixCourseCount(-1), 0);
+    Check("class past table has no courses", GrandPrixCourseCount(6), 0);
+
+    Check("standard class record", GrandPrixClassRecordIndex(0, 5), 5);
+    Check("extra class record", GrandPrixClassRecordIndex(1, 4), 10);
+    Check("invalid shared-extra record", GrandPrixClassRecordIndex(1, 5), -1);
+    Check("invalid series record", GrandPrixClassRecordIndex(2, 0), -1);
+
+    for (i = 0; i < (s32)(sizeof(expectedUnlocks) / sizeof(expectedUnlocks[0]));
+         i++) {
+        Check("next class record", NextUnlockedClassRecord(i),
+              expectedUnlocks[i]);
+    }
+    Check("invalid next class record", NextUnlockedClassRecord(-1), -1);
+    Check("past last class record",
+          NextUnlockedClassRecord(CLASS_RECORD_COUNT), -1);
+
+    Check("standard class 3", IsFinalGrandPrixClass(0, 3), 0);
+    Check("standard class 4", IsFinalGrandPrixClass(0, 4), 1);
+    Check("standard class 5", IsFinalGrandPrixClass(0, 5), 0);
+    Check("extra class 4", IsFinalGrandPrixClass(1, 4), 0);
+    Check("extra class 5", IsFinalGrandPrixClass(1, 5), 1);
+
+    Check("next standard class", NextGrandPrixClassForSeries(0, 3), 4);
+    Check("standard final has no next class",
+          NextGrandPrixClassForSeries(0, 4), -1);
+    Check("Extra advances to shared finale",
+          NextGrandPrixClassForSeries(1, 4), 5);
+    Check("shared finale has no next class",
+          NextGrandPrixClassForSeries(1, 5), -1);
+    Check("invalid series has no next class",
+          NextGrandPrixClassForSeries(2, 0), -1);
+
+    Check("standard asset series", GrandPrixAssetSeries(0, 4), 0);
+    Check("extra asset series", GrandPrixAssetSeries(1, 4), 1);
+    Check("shared finale asset series", GrandPrixAssetSeries(1, 5), 0);
+    Check("negative class asset compatibility", GrandPrixAssetSeries(1, -1), 1);
+    Check("past class asset compatibility", GrandPrixAssetSeries(1, 6), 0);
+    Check("invalid series asset compatibility", GrandPrixAssetSeries(-1, 4), -1);
+    Check("invalid series finale compatibility", GrandPrixAssetSeries(-1, 5), 0);
+
+    Check("zero prize", PrizeCountStep(0, 80), 1);
+    Check("small prize", PrizeCountStep(79, 80), 1);
+    Check("exact prize", PrizeCountStep(80, 80), 1);
+    Check("large prize", PrizeCountStep(801, 80), 10);
+    Check("negative prize", PrizeCountStep(-80, 80), 1);
+    Check("no promotion bonus", PrizeCountStep(0, 250), 1);
+    Check("zero count duration", PrizeCountStep(100, 0), 1);
+    Check("negative count duration", PrizeCountStep(100, -1), 1);
+
+    Check("class promotion bonus",
+          PromotionBonusForClass(promotionBonuses, 5, 3, 1), 100000);
+    Check("no bonus without promotion",
+          PromotionBonusForClass(promotionBonuses, 5, 3, 0), 0);
+    Check("shared finale has no bonus entry",
+          PromotionBonusForClass(promotionBonuses, 5, 5, 1), 0);
+    Check("missing promotion table",
+          PromotionBonusForClass(NULL, 5, 0, 1), 0);
+    {
+        const s32 negativeBonuses[1] = {-500};
+        Check("negative promotion bonus",
+              PromotionBonusForClass(negativeBonuses, 1, 0, 1), 0);
+    }
+
+    Check("first-place prize", PrizeForRacePosition(prizes, 3, 1), 10000);
+    Check("third-place prize", PrizeForRacePosition(prizes, 3, 3), 2500);
+    Check("zero-place prize", PrizeForRacePosition(prizes, 3, 0), 0);
+    Check("place past prize table", PrizeForRacePosition(prizes, 3, 4), 0);
+    Check("missing prize table", PrizeForRacePosition(NULL, 3, 1), 0);
+    {
+        const s32 negativePrizes[1] = {-100};
+        Check("negative race prize",
+              PrizeForRacePosition(negativePrizes, 1, 1), 0);
+    }
+
+    Check("money below cap", ClampPrizeMoney(1234), 1234);
+    Check("negative money", ClampPrizeMoney(-1), 0);
+    Check("money above cap", ClampPrizeMoney(1000000000),
+          RACE_MAX_PRIZE_MONEY);
+    Check("ordinary prize credit", CreditPrizeMoney(1000, 500), 1500);
+    Check("prize credit reaches cap",
+          CreditPrizeMoney(RACE_MAX_PRIZE_MONEY - 100, 500),
+          RACE_MAX_PRIZE_MONEY);
+    Check("credit at cap", CreditPrizeMoney(RACE_MAX_PRIZE_MONEY, 500),
+          RACE_MAX_PRIZE_MONEY);
+
+    records[0].place = 1;
+    records[3].place = 2;
+    records[5].place = 1;
+    records[10].place = -1;
+    Check("class wins", CountClassWins(records, CLASS_RECORD_COUNT), 2);
+    Check("empty class record range", CountClassWins(records, 0), 0);
+    Check("missing class records", CountClassWins(NULL, 3), 0);
+    Check("oversized class record range",
+          CountClassWins(records, CLASS_RECORD_COUNT + 10), 2);
+    Check("four wins keep default BGM", BgmTrackCountForClassWins(4), 9);
+    Check("fifth win unlocks BGM", BgmTrackCountForClassWins(5), 10);
+    Check("later wins keep unlocked BGM",
+          BgmTrackCountForClassWins(CLASS_RECORD_COUNT), 10);
+
+    Check("first course result", BestRacePlace(0, 3), 3);
+    Check("improved course result", BestRacePlace(3, 1), 1);
+    Check("worse course result", BestRacePlace(2, 3), 2);
+    Check("invalid course result is ignored", BestRacePlace(2, -1), 2);
+    Check("three-course class complete",
+          GrandPrixClassIsComplete(shortFirstPlace, 3), 1);
+    Check("fourth course still missing",
+          GrandPrixClassIsComplete(missingFourthPlace, 4), 0);
+    Check("four-course class complete",
+          GrandPrixClassIsComplete(firstPlace, 4), 1);
+    Check("missing class progress is incomplete",
+          GrandPrixClassIsComplete(NULL, 4), 0);
+    Check("oversized class progress is incomplete",
+          GrandPrixClassIsComplete(firstPlace, 5), 0);
+
+    Check("first class grade", BestClassGrade(0, 3), 3);
+    Check("improved class grade", BestClassGrade(3, 1), 1);
+    Check("worse class grade", BestClassGrade(2, 3), 2);
+    Check("no new grade keeps record", BestClassGrade(2, 0), 2);
+    Check("first-place clear increments", UpdatedClassClearCount(98, 1), 99);
+    Check("clear count stops at 99", UpdatedClassClearCount(99, 1), 99);
+    Check("corrupt high clear count is preserved",
+          UpdatedClassClearCount(0xFFFF, 1), 0xFFFF);
+    Check("lower grade does not count as clear",
+          UpdatedClassClearCount(12, 2), 12);
+
+    Check("first-place grade", ComputeClassGradeForPlaces(firstPlace, 0), 1);
+    Check("unused fourth course",
+          ComputeClassGradeForPlaces(shortFirstPlace, 0), 1);
+    Check("second-place grade", ComputeClassGradeForPlaces(secondPlace, 0), 2);
+    Check("third-place grade", ComputeClassGradeForPlaces(thirdPlace, 0), 3);
+    Check("no class grade", ComputeClassGradeForPlaces(noGrade, 0), 0);
+    Check("pending unlock blocks grade",
+          ComputeClassGradeForPlaces(firstPlace, 1), 0);
+    Check("missing places have no grade",
+          ComputeClassGradeForPlaces(NULL, 0), 0);
+
+    return s_failures != 0;
+}

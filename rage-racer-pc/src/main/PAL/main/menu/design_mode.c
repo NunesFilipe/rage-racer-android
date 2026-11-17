@@ -1,0 +1,225 @@
+#include "game/audio.h"
+#include "game/car.h"
+#include "game/menu.h"
+#include "game/menu_internal.h"
+
+enum DesignModeState {
+    DESIGN_MODE_DENIED = -1,
+    DESIGN_MODE_IDLE = 0,
+    DESIGN_MODE_EXIT_TO_LOGO = 1,
+    DESIGN_MODE_EXIT_TO_NAME = 2,
+    DESIGN_MODE_EXIT_TO_PAINT = 3,
+    DESIGN_MODE_EXIT_TO_CUSTOMIZE = 4,
+};
+
+enum DesignModeOption {
+    DESIGN_MODE_OPTION_LOGO,
+    DESIGN_MODE_OPTION_NAME,
+    DESIGN_MODE_OPTION_PAINT,
+    DESIGN_MODE_OPTION_EXIT,
+    DESIGN_MODE_OPTION_COUNT,
+};
+
+enum {
+    DESIGN_MODE_GRID_SIZE = 6,
+};
+
+static const u8 s_cellMask[DESIGN_MODE_GRID_SIZE][DESIGN_MODE_GRID_SIZE] = {
+    {0, 0, 0, 0, 1, 0},
+    {0, 0, 1, 0, 0, 0},
+    {0, 0, 1, 0, 0, 0},
+    {1, 1, 1, 0, 0, 0},
+    {1, 0, 1, 0, 0, 0},
+    {1, 1, 1, 0, 0, 0},
+};
+
+s32 DrawDesignModeScreen(s32 *progress, s32 step) {
+    GameOrderingTableEntry *ot;
+    s32 remainingFade;
+    s32 offset = 0;
+    s32 fade;
+    s32 intensity;
+    s32 y;
+    s32 row;
+    s32 column;
+
+    if (progress == NULL) {
+        return 0;
+    }
+    fade = AdvanceMenuFade(progress, step);
+    if (step == 0 || RENDER_OT_BASE == NULL) {
+        return fade;
+    }
+    ot = RENDER_OT_BASE + 1;
+
+    if (step < 0) {
+        remainingFade = MENU_FADE_MAX - fade;
+        offset = remainingFade * remainingFade / 2048;
+    }
+
+    y = 0xB0 - offset;
+    intensity = fade / MENU_FADE_INTENSITY_DIVISOR;
+
+    DrawSprite(ot, 0xB4, y, 0x18, 0xC, 0x94, 0xDC, (u8)intensity,
+               (u8)intensity, (u8)intensity, 0x244, 0, 1, 0x3B);
+    DrawSprite(ot, 0xCE, y, 0x14, 0xC, 0xE0, 0xDC, (u8)intensity,
+               (u8)intensity, (u8)intensity, 0x244, 0, 1, 0x3B);
+
+    for (row = 0; row < DESIGN_MODE_GRID_SIZE; row++) {
+        for (column = 0; column < DESIGN_MODE_GRID_SIZE; column++) {
+            s32 clutX;
+
+            if (s_cellMask[row][column] != 0) {
+                clutX = 0x26F;
+            } else {
+                clutX = 0x244;
+            }
+
+            DrawSprite(ot, 0xB4 + column * 0x10,
+                       0xC0 + row * 0x20 - offset, 0xC, 0x18, 0xF4,
+                       0x60, (u8)intensity, (u8)intensity, (u8)intensity,
+                       clutX, 0, 1, 0x39);
+        }
+    }
+
+    return *progress;
+}
+
+static void ExitDesignMode(void) {
+    PlaySoundCue(3);
+    GameMenuBusy = DESIGN_MODE_EXIT_TO_CUSTOMIZE;
+    g_MenuOverlayPattern = 2;
+}
+
+static void HandleDesignModeInput(DesignMode *screen) {
+    if (g_PadPressed & PAD_UP) {
+        PlaySoundCue(1);
+        screen->option = screen->option > 0
+                             ? screen->option - 1
+                             : DESIGN_MODE_OPTION_COUNT - 1;
+    }
+    if (g_PadPressed & PAD_DOWN) {
+        PlaySoundCue(1);
+        screen->option = screen->option < DESIGN_MODE_OPTION_COUNT - 1
+                             ? screen->option + 1
+                             : DESIGN_MODE_OPTION_LOGO;
+    }
+
+    if (!(g_PadPressed & PAD_CONFIRM)) {
+        if (g_PadPressed & PAD_CANCEL) ExitDesignMode();
+        return;
+    }
+
+    switch (screen->option) {
+    case DESIGN_MODE_OPTION_LOGO:
+        PlaySoundCue(2);
+        RampTeamLogoCanvas(MenuTeamLogo(), -256, -256);
+        GameMenuBusy = DESIGN_MODE_EXIT_TO_LOGO;
+        g_MenuOverlayPattern = 1;
+        break;
+    case DESIGN_MODE_OPTION_NAME:
+        PlaySoundCue(2);
+        GameMenuBusy = DESIGN_MODE_EXIT_TO_NAME;
+        g_MenuOverlayPattern = DESIGN_MODE_OPTION_NAME;
+        break;
+    case DESIGN_MODE_OPTION_PAINT:
+        if ((u32)g_PlayerCarIndex < CUSTOM_PAINT_CAR_COUNT) {
+            GameMenuBusy = DESIGN_MODE_EXIT_TO_PAINT;
+            g_MenuOverlayPattern = 1;
+            PlaySoundCue(2);
+        } else {
+            GameMenuBusy = DESIGN_MODE_DENIED;
+            g_UiScriptProgress2 = 0;
+            PlaySoundCue(5);
+        }
+        break;
+    case DESIGN_MODE_OPTION_EXIT:
+        ExitDesignMode();
+        break;
+    }
+}
+
+static void UpdateDesignModeIdle(DesignMode *screen) {
+    RunTimedDrawScript(g_DesignModeDeniedScript, &g_UiScriptProgress2, -1);
+    RunTimedDrawScript(g_UiChromeScript2, &g_UiScriptProgress2, 0);
+    DrawFadingMenuSprites(g_UiScriptProgress, DESIGN_MODE_OPTION_COUNT - 1,
+                          screen->option);
+    RunTimedDrawScript(g_DesignModeScript, &g_UiScriptProgress, 0);
+    if (RunTimedDrawScript(g_UiChromeScript, &g_UiScriptProgress, 1) != 0) {
+        g_MenuOverlayPattern = -1;
+        HandleDesignModeInput(screen);
+    }
+}
+
+static void UpdateDesignModeDenied(const DesignMode *screen) {
+    RunTimedDrawScript(g_DesignModeDeniedScript, &g_UiScriptProgress2, 0);
+    if (RunTimedDrawScript(g_UiChromeScript2, &g_UiScriptProgress2, 1) != 0 &&
+        (g_PadPressed & (PAD_CONFIRM | PAD_CANCEL))) {
+        GameMenuBusy = DESIGN_MODE_IDLE;
+    }
+    DrawFadingMenuSprites(g_UiScriptProgress, DESIGN_MODE_OPTION_COUNT - 1,
+                          screen->option);
+    RunTimedDrawScript(g_DesignModeScript, &g_UiScriptProgress, 0);
+    RunTimedDrawScript(g_UiChromeScript, &g_UiScriptProgress, 1);
+}
+
+static void FinishDesignModeExit(DesignMode *screen) {
+    switch (GameMenuBusy) {
+    case DESIGN_MODE_EXIT_TO_LOGO:
+        MenuActivateScreen(MENU_SCREEN_TEAM_LOGO);
+        DrawTeamLogoCanvas(MenuTeamLogo(), 0, 0);
+        break;
+    case DESIGN_MODE_EXIT_TO_NAME:
+        MenuActivateScreen(MENU_SCREEN_TEAM_NAME);
+        DrawTeamNameEntry(MenuTeamName(), 0, 0);
+        g_MenuViewOffset = MENU_VIEW_OFFSET_MAX;
+        g_MenuViewOffsetTarget = 0;
+        g_MenuViewAngleTarget = 0;
+        g_MenuViewAngle = 0;
+        GameMenuCursor = g_TeamNameLength >= MENU_TEAM_NAME_MAX_LENGTH
+                             ? TEAM_NAME_KEY_END
+                             : 0;
+        MenuTeamName()->charModel = GameMenuCursor;
+        break;
+    case DESIGN_MODE_EXIT_TO_PAINT:
+        MenuActivateScreen(MENU_SCREEN_PAINT_COLOR);
+        g_UiScriptProgress2 = 0;
+        g_MenuViewOffset = MENU_VIEW_OFFSET_MAX;
+        g_MenuViewOffsetTarget = 0;
+        break;
+    case DESIGN_MODE_EXIT_TO_CUSTOMIZE:
+        MenuActivateScreen(MENU_SCREEN_CUSTOMIZE);
+        screen->option = DESIGN_MODE_OPTION_LOGO;
+        g_MenuViewOffset = MENU_VIEW_OFFSET_MAX;
+        g_MenuViewOffsetTarget = 0;
+        break;
+    }
+    g_UiScriptProgress = 0;
+    GameMenuBusy = DESIGN_MODE_IDLE;
+}
+
+static void UpdateDesignModeExit(DesignMode *screen) {
+    MenuBeginExit(MENU_SCREEN_DESIGN_MODE);
+    RunTimedDrawScript(g_DesignModeScript, &g_UiScriptProgress, -1);
+    RunTimedDrawScript(g_UiChromeScript, &g_UiScriptProgress, 0);
+    DrawFadingMenuSprites(g_UiScriptProgress, DESIGN_MODE_OPTION_COUNT - 1,
+                          screen->option);
+    if (g_UiScriptProgress <= 0) FinishDesignModeExit(screen);
+}
+
+void UpdateDesignModeScreen(void) {
+    DesignMode *screen = MenuDesignMode();
+
+    screen->option = AddClampedMenuValue(
+        screen->option, 0, DESIGN_MODE_OPTION_LOGO,
+        DESIGN_MODE_OPTION_COUNT - 1);
+    DrawMenuCarView();
+
+    if (GameMenuBusy == DESIGN_MODE_IDLE) {
+        UpdateDesignModeIdle(screen);
+    } else if (GameMenuBusy < DESIGN_MODE_IDLE) {
+        UpdateDesignModeDenied(screen);
+    } else {
+        UpdateDesignModeExit(screen);
+    }
+}

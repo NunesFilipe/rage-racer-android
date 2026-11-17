@@ -1,0 +1,94 @@
+#include "common.h"
+#include "game/audio.h"
+#include "game/sound.h"
+
+#include <limits.h>
+#include <stdio.h>
+#include <string.h>
+
+MusicChannel g_MusicChannels[AUDIO_MUSIC_CHANNEL_COUNT];
+SoundModeEntry g_SoundModes[AUDIO_SOUND_MODE_COUNT];
+
+#define CHECK(condition) do {                                                   \
+    if (!(condition)) {                                                         \
+        fprintf(stderr, "check failed at line %d: %s\n", __LINE__, #condition); \
+        return 1;                                                               \
+    }                                                                           \
+} while (0)
+
+static void Reset(void) {
+    s32 mode;
+    s32 channel;
+
+    memset(g_MusicChannels, 0, sizeof(g_MusicChannels));
+    memset(g_SoundModes, 0, sizeof(g_SoundModes));
+    for (mode = 0; mode < AUDIO_SOUND_MODE_COUNT; mode++) {
+        g_SoundModes[mode].count = 2;
+        g_SoundModes[mode].factor = 64 + mode * 16;
+        for (channel = 0; channel < AUDIO_MUSIC_CHANNEL_COUNT; channel++) {
+            g_SoundModes[mode].slots[channel].left = 10 + mode * 2 + channel;
+            g_SoundModes[mode].slots[channel].right = mode;
+        }
+    }
+    g_MusicChannels[0].left.value = -1;
+    g_MusicChannels[1].left.value = -1;
+}
+
+int main(void) {
+    Reset();
+    SetStereoSoundCue(1, 64, 32);
+    CHECK(g_MusicChannels[0].left.value == 12);
+    CHECK(g_MusicChannels[1].left.value == 13);
+    CHECK(g_MusicChannels[0].mode == MUSIC_CHANNEL_START &&
+          g_MusicChannels[1].mode == MUSIC_CHANNEL_START);
+    CHECK(g_MusicChannels[0].volLeft == 40);
+    CHECK(g_MusicChannels[0].volRight == 20);
+
+    SetStereoSoundCue(1, 32, 16);
+    CHECK(g_MusicChannels[0].mode == MUSIC_CHANNEL_UPDATE &&
+          g_MusicChannels[1].mode == MUSIC_CHANNEL_UPDATE);
+
+    Reset();
+    SetStereoSoundCue(-5, 200, 200);
+    CHECK(g_MusicChannels[0].left.value == 10);
+    CHECK(g_MusicChannels[0].volLeft == 63);
+    CHECK(g_MusicChannels[0].volRight == 63);
+    SetStereoSoundCue(9, 64, 64);
+    CHECK(g_MusicChannels[0].left.value == 16);
+
+    Reset();
+    SetStereoSoundCue(0, 64, 64);
+    SetStereoSoundCue(1, 0, 0);
+    CHECK(g_MusicChannels[0].left.value == -1);
+    CHECK(g_MusicChannels[1].left.value == -1);
+    CHECK(g_MusicChannels[0].mode == MUSIC_CHANNEL_STOP &&
+          g_MusicChannels[1].mode == MUSIC_CHANNEL_STOP);
+    CHECK(g_MusicChannels[0].volLeft == 0 && g_MusicChannels[0].volRight == 0);
+
+    Reset();
+    SetStereoSoundCue(0, 64, 64);
+    SetStereoSoundCue(2, 0, 0);
+    CHECK(g_MusicChannels[0].left.value == 10);
+    CHECK(g_MusicChannels[0].mode == MUSIC_CHANNEL_START);
+
+    Reset();
+    g_SoundModes[0].count = 99;
+    SetStereoSoundCue(0, 64, 64);
+    CHECK(g_MusicChannels[0].left.value == 10 &&
+          g_MusicChannels[1].left.value == 11);
+
+    Reset();
+    g_SoundModes[0].factor = INT_MAX;
+    SetStereoSoundCue(0, 0x7F, 0x7F);
+    CHECK(g_MusicChannels[0].volLeft == 0x7F &&
+          g_MusicChannels[0].volRight == 0x7F);
+
+    Reset();
+    g_SoundModes[0].factor = INT_MIN;
+    SetStereoSoundCue(0, 0x7F, 0x7F);
+    CHECK(g_MusicChannels[0].volLeft == 0 &&
+          g_MusicChannels[0].volRight == 0);
+
+    puts("stereo sound cues preserve routing, reuse, and stop groups");
+    return 0;
+}

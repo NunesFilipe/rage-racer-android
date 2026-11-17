@@ -1,0 +1,447 @@
+
+#if !defined(_WIN32) && !defined(__APPLE__)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
+#ifdef __ANDROID__
+#include <SDL3/SDL.h>
+#endif
+
+#include <stdio.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+#define Mkdir(path) _mkdir(path)
+#elif defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#define Mkdir(path) mkdir(path, 0755)
+#else
+#include <dirent.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#define Mkdir(path) mkdir(path, 0755)
+#endif
+
+static int FileExists(const char *path) {
+#ifdef _WIN32
+    DWORD attributes;
+
+    if (path == NULL) return 0;
+    attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+#else
+    struct stat status;
+
+    return path != NULL && stat(path, &status) == 0 &&
+           S_ISREG(status.st_mode);
+#endif
+}
+
+static int DirectoryExists(const char *path) {
+#ifdef _WIN32
+    DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    struct stat status;
+    return stat(path, &status) == 0 && S_ISDIR(status.st_mode);
+#endif
+}
+
+/* A portable install is one that already holds saves beside the
+ * executable. An empty bu00 (left behind by an older build's BIOS card
+ * init, or by a curious player) must not hijack the per-user state root. */
+static int DirectoryHasFiles(const char *path) {
+#ifdef _WIN32
+    WIN32_FIND_DATAA entry;
+    char pattern[4096];
+    HANDLE handle;
+    int found = 0;
+    int written = snprintf(pattern, sizeof(pattern), "%s\\*", path);
+
+    if (written < 0 || (size_t)written >= sizeof(pattern)) return 0;
+    handle = FindFirstFileA(pattern, &entry);
+    if (handle == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            found = 1;
+            break;
+        }
+    } while (FindNextFileA(handle, &entry));
+    FindClose(handle);
+    return found;
+#else
+    DIR *directory = opendir(path);
+    struct dirent *entry;
+    int found = 0;
+
+    if (directory == NULL) return 0;
+    while ((entry = readdir(directory)) != NULL) {
+        char child[4096];
+        struct stat status;
+
+        if (entry->d_name[0] == '.') continue;
+        if (snprintf(child, sizeof(child), "%s/%s", path, entry->d_name) >=
+            (int)sizeof(child))
+            continue;
+        if (stat(child, &status) == 0 && S_ISREG(status.st_mode)) {
+            found = 1;
+            break;
+        }
+    }
+    closedir(directory);
+    return found;
+#endif
+}
+
+static int JoinPath(char *out, size_t outSize, const char *directory,
+                        const char *name) {
+#ifdef _WIN32
+    const char separator = '\\';
+#else
+    const char separator = '/';
+#endif
+    size_t length;
+    int written;
+
+    if (out == NULL || outSize == 0 || directory == NULL || name == NULL) {
+        return 0;
+    }
+    out[0] = '\0';
+    length = strlen(directory);
+    written = snprintf(out, outSize, "%s%s%s", directory,
+                       length > 0 && directory[length - 1] != '/' &&
+                               directory[length - 1] != '\\'
+                           ? (char[2]){separator, '\0'}
+                           : "",
+                       name);
+    if (written < 0 || (size_t)written >= outSize) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+#ifdef __APPLE__
+/* Finder runs quarantined bundles from an App Translocation mount.  Resolve
+ * that temporary executable back to the bundle the player extracted, so a
+ * catalog beside the app remains editable.  The Security entry point is
+ * available on supported macOS versions but is not declared by its headers. */
+typedef CFURLRef (*TranslocationOriginalPathFn)(CFURLRef, CFErrorRef *);
+
+static int ResolveTranslocatedPath(char *path, size_t pathSize) {
+    void *security;
+    TranslocationOriginalPathFn originalPath;
+    CFURLRef url, original;
+    int ok = 0;
+
+    if (path == NULL || pathSize == 0 || path[0] == '\0') return 0;
+    security = dlopen("/System/Library/Frameworks/Security.framework/Security",
+                      RTLD_LAZY | RTLD_LOCAL);
+    if (security == NULL) return 0;
+    originalPath = (TranslocationOriginalPathFn)dlsym(
+        security, "SecTranslocateCreateOriginalPathForURL");
+    if (originalPath == NULL) { dlclose(security); return 0; }
+    url = CFURLCreateFromFileSystemRepresentation(
+        kCFAllocatorDefault, (const UInt8 *)path, (CFIndex)strlen(path), 0);
+    if (url == NULL) { dlclose(security); return 0; }
+    original = originalPath(url, NULL);
+    if (original != NULL && CFURLGetFileSystemRepresentation(
+            original, true, (UInt8 *)path, (CFIndex)pathSize)) ok = 1;
+    if (original != NULL) CFRelease(original);
+    CFRelease(url);
+    dlclose(security);
+    return ok;
+}
+#endif
+
+int PlatformExecutableDirectory(const char *argv0, char *out,
+                                size_t outSize) {
+#ifdef __ANDROID__
+    (void)argv0;
+    if (out == NULL || outSize == 0) return 0;
+    out[0] = '\0';
+    const char *env_dir = getenv("RAGE_PORT_DIR");
+    if (env_dir != NULL && env_dir[0] != '\0') {
+        if (strlen(env_dir) + 1 > outSize) return 0;
+        strcpy(out, env_dir);
+        return 1;
+    }
+    char *pref = SDL_GetPrefPath("Namco", "RageRacer");
+    if (pref != NULL) {
+        size_t len = strlen(pref);
+        if (len > 0 && pref[len - 1] == '/') pref[len - 1] = '\0';
+        if (strlen(pref) + 1 > outSize) {
+            SDL_free(pref);
+            return 0;
+        }
+        strcpy(out, pref);
+        SDL_free(pref);
+        return 1;
+    }
+    return 0;
+#else
+    char executable[4096];
+    size_t length = 0;
+    char *slash;
+
+    if (out == NULL || outSize == 0) return 0;
+    out[0] = '\0';
+#ifdef _WIN32
+    DWORD result = GetModuleFileNameA(NULL, executable, sizeof(executable));
+    if (result == 0 || result >= sizeof(executable)) return 0;
+    length = result;
+#elif defined(__APPLE__)
+    uint32_t size = sizeof(executable);
+    if (_NSGetExecutablePath(executable, &size) != 0) return 0;
+    length = strlen(executable);
+    ResolveTranslocatedPath(executable, sizeof(executable));
+    length = strlen(executable);
+#else
+    ssize_t result = readlink("/proc/self/exe", executable,
+                              sizeof(executable) - 1);
+    if (result > 0) length = (size_t)result;
+#endif
+    if (length == 0 && argv0 != NULL && strchr(argv0, '/') != NULL) {
+        if (strlen(argv0) >= sizeof(executable)) return 0;
+        strcpy(executable, argv0);
+        length = strlen(executable);
+    }
+    if (length == 0) return 0;
+    executable[length] = '\0';
+    slash = strrchr(executable, '/');
+#ifdef _WIN32
+    {
+        char *backslash = strrchr(executable, '\\');
+        if (backslash != NULL && (slash == NULL || backslash > slash))
+            slash = backslash;
+    }
+#endif
+    if (slash == NULL) return 0;
+    *slash = '\0';
+    if (strlen(executable) + 1 > outSize) return 0;
+    strcpy(out, executable);
+    return 1;
+#endif
+}
+
+int PlatformExistingPortableStateDirectory(
+    const char *executableDirectory, char *out, size_t outSize) {
+    char candidate[4096];
+    char card[4096];
+    size_t length;
+    const char bundleSuffix[] = "/Contents/MacOS";
+
+    if (out == NULL || outSize == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (executableDirectory == NULL || executableDirectory[0] == '\0') {
+        return 0;
+    }
+    length = strlen(executableDirectory);
+    if (length >= sizeof(candidate)) return 0;
+    memcpy(candidate, executableDirectory, length + 1);
+
+    /* A macOS archive keeps bu00 beside Rage Racer.app, not inside its
+     * signed Contents directory. Recognize the bundle shape by path rather
+     * than by host so this helper remains straightforward to test. */
+    if (length > sizeof(bundleSuffix) - 1 &&
+        strcmp(candidate + length - (sizeof(bundleSuffix) - 1),
+               bundleSuffix) == 0) {
+        char *app = candidate + length - (sizeof(bundleSuffix) - 1);
+        char *parent;
+        *app = '\0';
+        parent = strrchr(candidate, '/');
+        if (parent != NULL) {
+            *parent = '\0';
+            if (JoinPath(card, sizeof(card), candidate, "bu00") &&
+                DirectoryExists(card) && DirectoryHasFiles(card)) {
+                if (strlen(candidate) + 1 > outSize) return 0;
+                strcpy(out, candidate);
+                return 1;
+            }
+        }
+        memcpy(candidate, executableDirectory, length + 1);
+    }
+
+    if (!JoinPath(card, sizeof(card), candidate, "bu00") ||
+        !DirectoryExists(card) || !DirectoryHasFiles(card) ||
+        strlen(candidate) + 1 > outSize)
+        return 0;
+    strcpy(out, candidate);
+    return 1;
+}
+
+int PlatformUserConfigDirectory(char *out, size_t outSize) {
+    if (out == NULL || outSize == 0) return 0;
+    out[0] = '\0';
+#ifdef __ANDROID__
+    char *pref = SDL_GetPrefPath("Namco", "RageRacer");
+    if (pref != NULL) {
+        size_t len = strlen(pref);
+        if (len > 0 && pref[len - 1] == '/') pref[len - 1] = '\0';
+        if (strlen(pref) + 1 > outSize) {
+            SDL_free(pref);
+            return 0;
+        }
+        strcpy(out, pref);
+        SDL_free(pref);
+        return 1;
+    }
+    return 0;
+#else
+    const char *base;
+    int written;
+#ifdef _WIN32
+    base = getenv("APPDATA");
+    if (base == NULL || base[0] == '\0') return 0;
+    written = snprintf(out, outSize, "%s\\Rage Racer", base);
+#elif defined(__APPLE__)
+    base = getenv("HOME");
+    if (base == NULL || base[0] == '\0') return 0;
+    written = snprintf(out, outSize,
+                       "%s/Library/Application Support/Rage Racer", base);
+#else
+    base = getenv("XDG_CONFIG_HOME");
+    if (base != NULL && base[0] != '\0')
+        written = snprintf(out, outSize, "%s/rage-racer", base);
+    else {
+        base = getenv("HOME");
+        if (base == NULL || base[0] == '\0') return 0;
+        written = snprintf(out, outSize, "%s/.config/rage-racer", base);
+    }
+#endif
+    if (written < 0 || (size_t)written >= outSize) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+#endif
+}
+
+int PlatformUserStateDirectory(char *out, size_t outSize) {
+    if (out == NULL || outSize == 0) return 0;
+    out[0] = '\0';
+#ifdef __ANDROID__
+    return PlatformUserConfigDirectory(out, outSize);
+#elif defined(_WIN32)
+    return PlatformUserConfigDirectory(out, outSize);
+#elif defined(__APPLE__)
+    return PlatformUserConfigDirectory(out, outSize);
+#else
+    const char *base;
+    int written;
+    base = getenv("XDG_STATE_HOME");
+    if (base != NULL && base[0] != '\0')
+        written = snprintf(out, outSize, "%s/rage-racer", base);
+    else {
+        base = getenv("HOME");
+        if (base == NULL || base[0] == '\0') return 0;
+        written = snprintf(out, outSize, "%s/.local/state/rage-racer", base);
+    }
+    if (written < 0 || (size_t)written >= outSize) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+#endif
+}
+
+int PlatformUserConfigPath(const char *name, char *out, size_t outSize) {
+    char directory[4096];
+    if (out == NULL || outSize == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (name == NULL || name[0] == '\0') return 0;
+    return PlatformUserConfigDirectory(directory, sizeof(directory)) &&
+           JoinPath(out, outSize, directory, name);
+}
+
+int PlatformEnsureDirectory(const char *path) {
+    char buffer[4096];
+    char *cursor;
+    size_t length;
+
+    if (path == NULL) return 0;
+    length = strlen(path);
+    if (length == 0 || length >= sizeof(buffer)) return 0;
+    memcpy(buffer, path, length + 1);
+    for (cursor = buffer + 1; *cursor != '\0'; cursor++) {
+        if (*cursor != '/' && *cursor != '\\') continue;
+#ifdef _WIN32
+        if (cursor == buffer + 2 && buffer[1] == ':') continue;
+#endif
+        {
+            char separator = *cursor;
+            *cursor = '\0';
+            if (Mkdir(buffer) != 0 &&
+                (errno != EEXIST || !DirectoryExists(buffer))) {
+                return 0;
+            }
+            *cursor = separator;
+        }
+    }
+    return Mkdir(buffer) == 0 ||
+           (errno == EEXIST && DirectoryExists(buffer));
+}
+
+int PlatformFindBundledConfigFile(const char *argv0, const char *name,
+                                  char *path, size_t pathSize) {
+    char directory[4096];
+    int written;
+
+    if (path == NULL || pathSize == 0) return 0;
+    path[0] = '\0';
+    if (name == NULL || name[0] == '\0') return 0;
+    if (PlatformExecutableDirectory(argv0, directory, sizeof(directory))) {
+        if (JoinPath(path, pathSize, directory, name) &&
+            FileExists(path)) return 1;
+#ifdef __APPLE__
+        {
+            char beside[4096];
+            /* Beside the .app, where the archive keeps the editable copies.
+             * Anything inside Contents/Resources is sealed by the code
+             * signature, so editing it there stops the app from launching. */
+            if (JoinPath(beside, sizeof(beside), directory, "../../..") &&
+                JoinPath(path, pathSize, beside, name) &&
+                FileExists(path)) return 1;
+        }
+        {
+            char resources[4096];
+            if (JoinPath(resources, sizeof(resources), directory,
+                             "../Resources") &&
+                JoinPath(path, pathSize, resources, name) &&
+                FileExists(path)) return 1;
+        }
+#endif
+    }
+    written = snprintf(path, pathSize, "%s", name);
+    if (written >= 0 && (size_t)written < pathSize && FileExists(path)) {
+        return 1;
+    }
+    path[0] = '\0';
+    return 0;
+}
+
+int PlatformFindConfigFile(const char *argv0, const char *name,
+                            char *path, size_t pathSize) {
+    char directory[4096];
+    if (path == NULL || pathSize == 0) return 0;
+    path[0] = '\0';
+    if (name == NULL || name[0] == '\0') return 0;
+    if (PlatformUserConfigDirectory(directory, sizeof(directory)) &&
+        JoinPath(path, pathSize, directory, name) && FileExists(path)) return 1;
+    return PlatformFindBundledConfigFile(argv0, name, path, pathSize);
+}

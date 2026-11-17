@@ -1,0 +1,71 @@
+#include "game/render.h"
+#include "game/render_internal.h"
+#include "game/track_internal.h"
+#include "rage/render_world_game.h"
+
+enum {
+    STANDARD_SCENERY_ENTITY_ID = 0,
+    HIGH_CLASS_SCENERY_ENTITY_ID = 1,
+    STANDARD_SCENERY_MODEL = 0x39,
+    ENVIRONMENT_MODE4_SCENERY_MODEL = 0x3A,
+    HIGH_CLASS_SCENERY_MODEL = 0x3F,
+    SERIES_COURSE_Z_OFFSET = 0x5000,
+    HIGH_CLASS_ENVIRONMENT_MODE = 0x10000,
+};
+
+static void SubmitStaticScenery(const LVec *sourcePosition, s32 yaw,
+                                s32 worldObjectId, s32 modelId,
+                                s32 environmentMode, s32 classicVisible) {
+    Matrix objectMatrix;
+    Matrix worldMatrix;
+    LVec position = *sourcePosition;
+    s32 useEnvironmentModel = g_IsEnvironmentMode4 != 0;
+    s32 previousEnvironmentMode = g_RenderState.geometry.envMode4;
+
+    BuildRotMatrixY(&worldMatrix, yaw);
+    g_RenderState.geometry.envMode4 = useEnvironmentModel ? environmentMode : 0;
+    /* Large landmarks cross many cells. The classic scan of their origin
+     * must not make the complete native model pop into existence; the GPU
+     * tests its mesh bounds and clips it against the camera instead. */
+    GameRenderWorldSubmitDynamicCourseObject(
+        worldObjectId, modelId, position.x, position.y, position.z,
+        worldMatrix.m, !useEnvironmentModel, 0);
+    if (!classicVisible) {
+        g_RenderState.geometry.envMode4 = previousEnvironmentMode;
+        return;
+    }
+    objectMatrix = worldMatrix;
+    MulMatrix2(&g_RenderState.geometry.matrix, &objectMatrix);
+    SetGteObjectMatrix(&position, &objectMatrix);
+
+    if (useEnvironmentModel) {
+        SubmitCourseModel(&g_RenderState, modelId);
+    } else {
+        SubmitCourseModel2(&g_RenderState, modelId);
+    }
+}
+
+void DrawStaticScenery(s32 shiftForSeriesCourse) {
+    const SceneryPlacement *placement = &g_StaticSceneryState.standard;
+    LVec position = placement->position;
+    s32 modelId;
+
+    if (shiftForSeriesCourse != 0) {
+        position.z = WrapSigned32(
+            (int64_t)position.z + SERIES_COURSE_Z_OFFSET);
+    }
+    modelId = g_IsEnvironmentMode4 != 0 ? ENVIRONMENT_MODE4_SCENERY_MODEL
+                                       : STANDARD_SCENERY_MODEL;
+    SubmitStaticScenery(&position, placement->yaw, STANDARD_SCENERY_ENTITY_ID,
+                        ModelOrFallback(modelId, g_CourseModelCount), 0,
+                        TrackCellVisible(position.x, position.z));
+}
+
+void DrawHighClassScenery(void) {
+    const SceneryPlacement *placement = &g_StaticSceneryState.highClass;
+
+    SubmitStaticScenery(
+        &placement->position, placement->yaw, HIGH_CLASS_SCENERY_ENTITY_ID,
+        ModelOrFallback(HIGH_CLASS_SCENERY_MODEL, g_CourseModelCount),
+        HIGH_CLASS_ENVIRONMENT_MODE, 1);
+}

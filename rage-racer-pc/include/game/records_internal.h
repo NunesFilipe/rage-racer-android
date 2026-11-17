@@ -1,0 +1,50 @@
+#ifndef GAME_RECORDS_INTERNAL_H
+#define GAME_RECORDS_INTERNAL_H
+
+#include "common.h"
+#include "game/menu_types.h"
+#include "game/record_entry_state.h"
+
+enum {
+    RECORD_SERIES_COUNT = 2,
+    RECORD_COURSE_COUNT = 4,
+    RECORD_NAME_LENGTH = 6,
+    RECORD_TABLE_LENGTH = 5,
+    RECORD_REFERENCE_COUNT = 2,
+    RECORD_SECTOR_COUNT = 3,
+};
+
+extern const char *const g_PlaceSuffixNames[RECORD_TABLE_LENGTH];
+
+extern s32 g_DefaultLapTimes[RECORD_SERIES_COUNT * RECORD_COURSE_COUNT];
+extern s32 g_DefaultTotalTimes[RECORD_SERIES_COUNT * RECORD_COURSE_COUNT];
+
+extern RaceRecord
+    g_RankingRecords[RECORD_SERIES_COUNT][RECORD_COURSE_COUNT]
+                    [RECORD_TABLE_LENGTH];
+extern RaceRecord
+    g_TimeRecords[RECORD_SERIES_COUNT][RECORD_COURSE_COUNT]
+                 [RECORD_TABLE_LENGTH];
+
+typedef struct FastestLap {
+    s32 index;
+    s32 time;
+} FastestLap;
+
+FastestLap FindFastestLap(const s32 *lapTimes, s32 lapCount);
+s32 InsertRaceRecord(RaceRecord records[RECORD_TABLE_LENGTH], s32 raceTime,
+                     s16 carIndex, u8 nameCodes[RECORD_NAME_LENGTH]);
+void WriteRecordDriverName(RaceRecord *record, const u8 *nameCodes);
+s32 UpdateRecordNameEntry(RecordEntry *state, u8 *nameCodes);
+void EnterRecordEntry(void);
+void UpdateRecordEntry(void);
+void DrawNameEntryCursor(s32 charIndex, s32 row);
+void DrawRankingPanel(const RecordEntry *state, s32 slideX);
+void DrawTimeRecordPanel(const RecordEntry *state, s32 slideX);
+
+/* Restores the authored references for uninitialised record fields in an
+ * otherwise valid memory-card save.  Early host builds could write zeroes
+ * here; zero is never a valid completed lap, total, or sector time. */
+void RepairRecordTimes(void);
+
+#endif

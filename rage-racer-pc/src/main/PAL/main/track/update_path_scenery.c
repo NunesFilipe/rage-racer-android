@@ -1,0 +1,224 @@
+#include "game/audio.h"
+#include "game/player_car_internal.h"
+#include "game/race.h"
+#include "game/render_internal.h"
+#include "game/track_internal.h"
+#include "psyq/gte.h"
+
+#include <stdint.h>
+
+enum {
+    PATH_SCENERY_AUDIO_RANGE = 0x1000,
+    PATH_SCENERY_MAX_VOLUME = 0x64,
+    PATH_SCENERY_MAX_VOLUME_STEP = 0x14,
+    PATH_SCENERY_BASE_PITCH = 0x3C,
+};
+
+static void AdvancePositionKeyframe(void) {
+    const PathSceneryPositionKey *keyframe;
+    s16 index;
+
+    if (g_PathSceneryClock.posFrame != g_PathSceneryCursors.posSpan) {
+        g_PathSceneryCursors.posPhase = WrapSigned16(
+            (int64_t)g_PathSceneryCursors.posPhase + 1);
+        return;
+    }
+
+    g_PathSceneryCursors.posPhase = 0;
+    index = (s16)((u16)g_PathSceneryCursors.posIndex + 1u);
+    keyframe = &g_PathSceneryPosKeys[index];
+    if (keyframe->span == -1) {
+        index = (s16)keyframe->loopIndex;
+        g_PathSceneryClock.posFrame = index > 0
+            ? g_PathSceneryPosKeys[index - 1].span
+            : 0;
+        keyframe = &g_PathSceneryPosKeys[index];
+    }
+
+    g_PathSceneryCursors.posIndex = index;
+    g_PathSceneryCursors.posRate =
+        NormalizePathSceneryRate(keyframe->rate);
+    g_PathSceneryCursors.posSpan = keyframe->span;
+    g_PathSceneryHalfDelta[0] = PathSceneryHalfDelta(
+        keyframe[0].position.x, keyframe[1].position.x);
+    g_PathSceneryHalfDelta[1] = PathSceneryHalfDelta(
+        keyframe[0].position.y, keyframe[1].position.y);
+    g_PathSceneryHalfDelta[2] = PathSceneryHalfDelta(
+        keyframe[0].position.z, keyframe[1].position.z);
+}
+
+static void AdvanceRotationKeyframe(void) {
+    const PathSceneryRotationKey *keyframe;
+    s16 index;
+
+    if (g_PathSceneryClock.rotFrame != g_PathSceneryCursors.rotSpan) {
+        g_PathSceneryCursors.rotPhase = WrapSigned16(
+            (int64_t)g_PathSceneryCursors.rotPhase + 1);
+        return;
+    }
+
+    g_PathSceneryCursors.rotPhase = 0;
+    index = (s16)((u16)g_PathSceneryCursors.rotIndex + 1u);
+    keyframe = &g_PathSceneryRotKeys[index];
+    if (keyframe->fields.span == -1) {
+        index = (s16)keyframe->fields.loopIndex;
+        g_PathSceneryClock.rotFrame = index > 0
+            ? g_PathSceneryRotKeys[index - 1].fields.span
+            : 0;
+        keyframe = &g_PathSceneryRotKeys[index];
+    }
+
+    g_PathSceneryCursors.rotIndex = index;
+    g_PathSceneryCursors.rotRate =
+        NormalizePathSceneryRate(keyframe->fields.rate);
+    g_PathSceneryCursors.rotSpan = keyframe->fields.span;
+    g_PathSceneryRotHalfDelta[0] =
+        (s16)((keyframe[1].fields.x - keyframe[0].fields.x) / 2);
+    g_PathSceneryRotHalfDelta[1] =
+        (s16)((keyframe[1].fields.y - keyframe[0].fields.y) / 2);
+    g_PathSceneryRotHalfDelta[2] =
+        (s16)((keyframe[1].fields.z - keyframe[0].fields.z) / 2);
+}
+
+static s32 EasePathValue(s32 start, s32 end, s32 halfDelta,
+                         s16 phase, s16 rate) {
+    s32 angle;
+
+    if (phase > rate) {
+        return end;
+    }
+
+    angle = (s32)((int64_t)phase * 0x800 / rate);
+    if (phase <= rate / 2) {
+        return WrapSigned32(
+            (int64_t)end - (int64_t)halfDelta * rcos(angle) / 4096 -
+            halfDelta);
+    }
+    return WrapSigned32(
+        (int64_t)start +
+        (int64_t)halfDelta * rsin(angle - 0x400) / 4096 + halfDelta);
+}
+
+static void UpdatePathPosition(void) {
+    const PathSceneryPositionKey *keyframe =
+        &g_PathSceneryPosKeys[g_PathSceneryCursors.posIndex];
+    const s16 phase = g_PathSceneryCursors.posPhase;
+    const s16 rate = g_PathSceneryCursors.posRate;
+    g_PathSceneryTransform.position.x = EasePathValue(
+        keyframe[0].position.x, keyframe[1].position.x,
+        g_PathSceneryHalfDelta[0], phase, rate);
+    g_PathSceneryTransform.position.y = EasePathValue(
+        keyframe[0].position.y, keyframe[1].position.y,
+        g_PathSceneryHalfDelta[1], phase, rate);
+    g_PathSceneryTransform.position.z = EasePathValue(
+        keyframe[0].position.z, keyframe[1].position.z,
+        g_PathSceneryHalfDelta[2], phase, rate);
+    if (phase > rate) {
+        g_PathSceneryTransform.position = (Vec4){
+            keyframe[1].position.x,
+            keyframe[1].position.y,
+            keyframe[1].position.z,
+            0,
+        };
+    }
+}
+
+static void UpdatePathRotation(void) {
+    const PathSceneryRotationKey *keyframe =
+        &g_PathSceneryRotKeys[g_PathSceneryCursors.rotIndex];
+    const s16 phase = g_PathSceneryCursors.rotPhase;
+    const s16 rate = g_PathSceneryCursors.rotRate;
+
+    g_PathSceneryTransform.rotation.vx = WrapSigned16(
+        EasePathValue(keyframe[0].fields.x, keyframe[1].fields.x,
+                      g_PathSceneryRotHalfDelta[0], phase, rate));
+    g_PathSceneryTransform.rotation.vy = WrapSigned16(
+        EasePathValue(keyframe[0].fields.y, keyframe[1].fields.y,
+                      g_PathSceneryRotHalfDelta[1], phase, rate));
+    g_PathSceneryTransform.rotation.vz = WrapSigned16(
+        EasePathValue(keyframe[0].fields.z, keyframe[1].fields.z,
+                      g_PathSceneryRotHalfDelta[2], phase, rate));
+    if (phase > rate) {
+        g_PathSceneryTransform.rotation = keyframe[1].rotation;
+    }
+}
+
+static s32 PathSceneryDistance(int64_t dx, int64_t dy, int64_t dz) {
+    const uint64_t x = dx < 0 ? (uint64_t)-dx : (uint64_t)dx;
+    const uint64_t y = dy < 0 ? (uint64_t)-dy : (uint64_t)dy;
+    const uint64_t z = dz < 0 ? (uint64_t)-dz : (uint64_t)dz;
+    const uint64_t audibleRadius =
+        (uint64_t)PATH_SCENERY_MAX_VOLUME * 16;
+    uint64_t squared;
+
+    if (x >= audibleRadius * 2 || y >= audibleRadius * 3 ||
+        z >= audibleRadius * 2) {
+        return PATH_SCENERY_MAX_VOLUME;
+    }
+    squared = x * x / 4 + y * y / 8 + z * z / 4;
+    if (squared >= audibleRadius * audibleRadius) {
+        return PATH_SCENERY_MAX_VOLUME;
+    }
+    return (s32)(SquareRoot12((long)squared) >> 10);
+}
+
+static void UpdatePathSceneryAudio(void) {
+    const int64_t dx =
+        (int64_t)g_PlayerCar.x - g_PathSceneryTransform.position.x;
+    const int64_t dy =
+        (int64_t)g_PlayerCar.y - g_PathSceneryTransform.position.y;
+    const int64_t dz =
+        (int64_t)g_PlayerCar.z - g_PathSceneryTransform.position.z;
+    s32 pitch = 0;
+    s32 volume = 0;
+
+    if (dx < PATH_SCENERY_AUDIO_RANGE &&
+        dz < PATH_SCENERY_AUDIO_RANGE &&
+        dx > -PATH_SCENERY_AUDIO_RANGE &&
+        dz > -PATH_SCENERY_AUDIO_RANGE) {
+        const s32 distance = PathSceneryDistance(dx, dy, dz);
+        s32 volumeDelta;
+
+        volume = PATH_SCENERY_MAX_VOLUME - distance;
+        if (volume > PATH_SCENERY_MAX_VOLUME) {
+            volume = PATH_SCENERY_MAX_VOLUME;
+        } else if (volume < 0) {
+            volume = 0;
+        }
+
+        volumeDelta = volume - g_PathSceneryVolume;
+        if (volumeDelta < -PATH_SCENERY_MAX_VOLUME_STEP) {
+            volumeDelta = -PATH_SCENERY_MAX_VOLUME_STEP;
+        } else if (volumeDelta > PATH_SCENERY_MAX_VOLUME_STEP) {
+            volumeDelta = PATH_SCENERY_MAX_VOLUME_STEP;
+        }
+        pitch = (volumeDelta / 2 + PATH_SCENERY_BASE_PITCH) << 7;
+        g_PathSceneryVolume = volume;
+    } else {
+        g_PathSceneryVolume = 0;
+    }
+
+    if (g_RacePhase >= RACE_PHASE_UNOBSERVED) {
+        pitch = 0;
+        volume = 0;
+    }
+    SetPitchedSoundCue(0, pitch, volume);
+}
+
+void UpdatePathScenery(void) {
+    if (g_PathSceneryPosKeys == NULL || g_PathSceneryRotKeys == NULL) {
+        g_PathSceneryVolume = 0;
+        SetPitchedSoundCue(0, 0, 0);
+        return;
+    }
+    AdvancePositionKeyframe();
+    UpdatePathPosition();
+    AdvanceRotationKeyframe();
+    UpdatePathRotation();
+
+    g_PathSceneryClock.posFrame =
+        (s16)((u16)g_PathSceneryClock.posFrame + 1u);
+    g_PathSceneryClock.rotFrame =
+        (s16)((u16)g_PathSceneryClock.rotFrame + 1u);
+    UpdatePathSceneryAudio();
+}

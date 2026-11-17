@@ -1,0 +1,140 @@
+#include <assert.h>
+#include <stddef.h>
+
+#include "game/asset.h"
+#include "game/car.h"
+#include "game/cd.h"
+#include "game/menu.h"
+#include "game/race.h"
+#include "game/race_internal.h"
+#include "game/scene.h"
+#include "game/scene_runtime.h"
+
+s32 g_FrameSyncThreshold;
+s32 g_FadeLevel;
+s32 g_FadeStep;
+s32 g_SceneId;
+s32 g_SceneTimer;
+s32 g_CameraCarIndex;
+static BgmSelect s_state;
+s32 g_CdTrackEnded;
+s32 g_AssetLoadState;
+s32 g_AssetLoadFailed;
+u8 *g_AssetBase;
+u8 *g_ImageBlockBuffer;
+size_t g_ImageBlockSize;
+static u8 s_assetBuffer[128];
+
+static int s_assetReady, s_uploads, s_installs, s_trackRequests, s_trackInit;
+static int s_displayMask, s_fades, s_failed;
+static AssetLoadTransaction s_assets;
+BgmSelect *SceneRuntimeBgmSelect(void) { return &s_state; }
+
+void SetDispMask(s32 enabled) { s_displayMask = enabled; }
+void SetupDisplay240(s32 a, s32 b, s32 c) { assert(a == 0 && b == 0 && c == 0); }
+s32 AssetLoadCompletedSuccessfully(void) { return s_assetReady; }
+const AssetLoadTransaction *SceneRuntimeAssetResult(AssetRequestType request) {
+    return request == ASSET_REQUEST_SELECT_BGM &&
+                   s_assets.request == request
+               ? &s_assets
+               : NULL;
+}
+const AssetLoadTransaction *SceneRuntimeActiveAssetResult(void) {
+    return s_assets.complete ? &s_assets : NULL;
+}
+s32 UploadImageAsset(const GameImageAssetHeaderWord *header, size_t size) { (void)header; (void)size; s_uploads++; return 1; }
+s32 AssetSpanSize(const void *base, const void *end, size_t *size) { (void)base; (void)end; *size = 64; return 1; }
+s32 InstallTrackTextureAssetPack(u8 *base, size_t size) { (void)base; assert(size == 64); s_installs++; return 1; }
+s32 RequestTrackDataAssets(void) { s_trackRequests++; return 1; }
+void FailAssetLoad(void) { s_failed++; }
+void InitTrackScene(void) { s_trackInit++; }
+void DrawFullscreenFadeTile(s32 level, s32 tpage) { assert(tpage == 0x49); (void)level; s_fades++; }
+void DrawProportionalText(s32 x, s32 y, const char *text, s32 color) { (void)x; (void)y; (void)text; (void)color; }
+
+static void Reset(void) {
+    s_assetReady = s_uploads = s_installs = s_trackRequests = s_trackInit = 0;
+    s_displayMask = -1; s_fades = s_failed = 0;
+    g_AssetBase = s_assetBuffer;
+    g_ImageBlockBuffer = s_assetBuffer + 64;
+    g_ImageBlockSize = 64;
+    s_assets = (AssetLoadTransaction){
+        .request = ASSET_REQUEST_SELECT_BGM,
+        .generation = 1,
+        .complete = 1,
+        .payload.selectBgm.texturePack = {s_assetBuffer, 64},
+        .image = {s_assetBuffer + 64, 64},
+    };
+    s_state = (BgmSelect){0};
+    g_SceneTimer = 0; g_FadeLevel = 316; g_FadeStep = -4;
+}
+
+static void TestEntryKeepsOptionTextureBoundaryWithoutUploadingSelectBin(void) {
+    Reset();
+    EnterBgmSelectScreen();
+    assert(s_displayMask == 0 && g_SceneId == GAME_SCENE_BGM_SELECT);
+    assert(s_state.step == BGM_SELECT_STEP_LOAD_ASSETS &&
+           g_CameraCarIndex == 0 && s_state.cdTrack == 3);
+    s_assetReady = 1;
+    assert(AssetLoadCompletedSuccessfully());
+    UpdateBgmSelectLoad(&s_state);
+    /* SELECT.BIN is an audio pack.  It reuses OPTION.BIN's image boundary but
+     * does not contain a TIM at that address, so uploading it leaves the
+     * player permanently in the loading transition on strict GPU backends. */
+    assert(s_uploads == 0);
+    assert(s_installs == 1);
+    assert(s_trackRequests == 1);
+    assert(s_failed == 0);
+    assert(s_state.step == BGM_SELECT_STEP_FADE_IN);
+    assert(s_trackInit == 0);
+}
+
+static void TestRejectsAnAssetResultFromAnotherScene(void) {
+    Reset();
+    EnterBgmSelectScreen();
+    s_assetReady = 1;
+    s_assets.request = ASSET_REQUEST_OPTION_SCREEN;
+    UpdateBgmSelectLoad(&s_state);
+    assert(g_AssetLoadFailed == 1 && s_trackRequests == 0);
+}
+
+static void TestAcceptsCourseTextureTransitionFromOptions(void) {
+    Reset();
+    EnterBgmSelectScreen();
+    s_assetReady = 1;
+    s_assets.request = ASSET_REQUEST_COURSE_TEXTURES;
+    s_assets.payload.race.texturePack = (AssetLoadSpan){s_assetBuffer, 64};
+    UpdateBgmSelectLoad(&s_state);
+    assert(s_failed == 0 && s_trackRequests == 1 &&
+           s_state.step == BGM_SELECT_STEP_FADE_IN);
+}
+
+static void TestTrackWorldStartsOnlyAfterTrackAssets(void) {
+    Reset();
+    s_state.step = BGM_SELECT_STEP_FADE_IN;
+    g_FadeLevel = 253; g_FadeStep = 0;
+    UpdateBgmSelectFadeIn(&s_state);
+    assert(s_trackInit == 0 && s_state.step == BGM_SELECT_STEP_FADE_IN);
+    s_assetReady = 1;
+    UpdateBgmSelectFadeIn(&s_state);
+    assert(s_trackInit == 1 && s_displayMask == 0 &&
+           s_state.step == BGM_SELECT_STEP_ACTIVE && g_FadeLevel == 0);
+}
+
+static void TestFadeInDoesNotBuildAWorldWhileLoading(void) {
+    Reset();
+    s_state.step = BGM_SELECT_STEP_FADE_IN;
+    g_FadeLevel = 316;
+    g_FadeStep = -4;
+    UpdateBgmSelectFadeIn(&s_state);
+    assert(s_trackInit == 0 && s_state.step == BGM_SELECT_STEP_FADE_IN);
+    assert(g_FadeLevel == 257 && g_FadeStep == -4);
+}
+
+int main(void) {
+    TestEntryKeepsOptionTextureBoundaryWithoutUploadingSelectBin();
+    TestRejectsAnAssetResultFromAnotherScene();
+    TestAcceptsCourseTextureTransitionFromOptions();
+    TestTrackWorldStartsOnlyAfterTrackAssets();
+    TestFadeInDoesNotBuildAWorldWhileLoading();
+    return 0;
+}

@@ -1,0 +1,168 @@
+#include "game/menu.h"
+#include "game/prim.h"
+#include "game/render_internal.h"
+
+#include <limits.h>
+#include <stdio.h>
+#include <string.h>
+
+static OptionMenu s_optionMenu;
+
+s32 g_AnimTimer;
+s32 g_GameMode;
+s32 g_SceneTimer;
+s32 g_FadeLevel;
+s32 g_FadeStep;
+GameFrameContext *g_DrawBuffer;
+GameRenderState g_RenderState;
+
+static GameFrameContext s_frame;
+static u8 s_packets[32];
+static s32 s_displayMask;
+static s32 s_handlerCalls[OPTION_MODE_COUNT];
+static s32 s_hintCalls;
+static s32 s_tileCalls;
+static s32 s_lastTileHeight;
+
+#define DEFINE_HANDLER(index)                                                  \
+    static void Handler##index(void) { s_handlerCalls[index]++; }
+
+DEFINE_HANDLER(0)
+DEFINE_HANDLER(1)
+DEFINE_HANDLER(2)
+DEFINE_HANDLER(3)
+DEFINE_HANDLER(4)
+DEFINE_HANDLER(5)
+DEFINE_HANDLER(6)
+DEFINE_HANDLER(7)
+DEFINE_HANDLER(8)
+DEFINE_HANDLER(9)
+DEFINE_HANDLER(10)
+
+void (*g_NativeGameModeHandlers[OPTION_MODE_COUNT])(void) = {
+    Handler0, Handler1, Handler2, Handler3, Handler4, Handler5,
+    Handler6, Handler7, Handler8, Handler9, Handler10,
+};
+
+u8 *AddTilePrim(GameOrderingTableEntry *ot, u8 *prim, s32 x, s32 y, s32 w,
+                s32 h, s32 r, s32 g, s32 b) {
+    (void)ot;
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)r;
+    (void)g;
+    (void)b;
+    s_tileCalls++;
+    s_lastTileHeight = h;
+    return prim + 1;
+}
+
+void DrawPadTypeHint(void) { s_hintCalls++; }
+void SetDispMask(s32 enabled) { s_displayMask = enabled; }
+
+#define CHECK(condition)                                                       \
+    do {                                                                       \
+        if (!(condition)) {                                                    \
+            fprintf(stderr, "%s:%d: check failed: %s\n", __FILE__, __LINE__, \
+                    #condition);                                               \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+static void Reset(OptionMode mode) {
+    memset(&s_frame, 0, sizeof(s_frame));
+    memset(s_handlerCalls, 0, sizeof(s_handlerCalls));
+    g_DrawBuffer = &s_frame;
+    g_RenderState.draw.packetCursor = s_packets;
+    g_AnimTimer = 10;
+    g_GameMode = mode;
+    s_optionMenu.letterboxHeight = 0;
+    g_SceneTimer = 0;
+    s_displayMask = 0;
+    s_hintCalls = 0;
+    s_tileCalls = 0;
+    s_lastTileHeight = -1;
+}
+
+int main(void) {
+    Reset(OPTION_MODE_SOUND_EDIT);
+    UpdateOptionScene();
+    CHECK(s_handlerCalls[OPTION_MODE_SOUND_EDIT] == 1);
+    CHECK(g_AnimTimer == 11 && g_SceneTimer == 1);
+    CHECK(s_displayMask == 0 && s_hintCalls == 1);
+    CHECK(s_optionMenu.letterboxHeight == 4);
+    CHECK(s_tileCalls == 2);
+
+    UpdateOptionScene();
+    CHECK(s_handlerCalls[OPTION_MODE_SOUND_EDIT] == 2);
+    CHECK(s_displayMask == 1 && g_SceneTimer == 2);
+
+    Reset(OPTION_MODE_NEGCON_NEUTRAL);
+    UpdateOptionScene();
+    CHECK(s_handlerCalls[OPTION_MODE_NEGCON_NEUTRAL] == 1);
+    CHECK(s_hintCalls == 0);
+
+    /* The first frame of a fresh OPTION scene arms the fade-in that the
+     * fade mode needs before it can open the root menu. */
+    Reset(OPTION_MODE_FADE);
+    g_FadeLevel = 0;
+    g_FadeStep = 0;
+    UpdateOptionScene();
+    CHECK(g_FadeLevel == 0x100 && g_FadeStep == -8);
+    CHECK(s_handlerCalls[OPTION_MODE_FADE] == 1);
+    /* An exit fade already running, or a later frame, is left alone. */
+    Reset(OPTION_MODE_FADE);
+    g_FadeLevel = 0;
+    g_FadeStep = 8;
+    UpdateOptionScene();
+    CHECK(g_FadeLevel == 0 && g_FadeStep == 8);
+    Reset(OPTION_MODE_FADE);
+    g_SceneTimer = 5;
+    g_FadeLevel = 0;
+    g_FadeStep = 0;
+    UpdateOptionScene();
+    CHECK(g_FadeLevel == 0 && g_FadeStep == 0);
+
+    Reset(OPTION_MODE_ROOT);
+    s_optionMenu.letterboxHeight = 239;
+    UpdateOptionScene();
+    CHECK(s_optionMenu.letterboxHeight == 240 && s_lastTileHeight == 240);
+
+    Reset(OPTION_MODE_ROOT);
+    s_optionMenu.letterboxHeight = 241;
+    UpdateOptionScene();
+    CHECK(s_optionMenu.letterboxHeight == 240 && s_lastTileHeight == 240);
+
+    Reset(OPTION_MODE_FADE);
+    g_GameMode = OPTION_MODE_COUNT;
+    UpdateOptionScene();
+    CHECK(g_GameMode == OPTION_MODE_ROOT && s_handlerCalls[OPTION_MODE_ROOT] == 1);
+
+    Reset(OPTION_MODE_FADE);
+    g_GameMode = -1;
+    UpdateOptionScene();
+    CHECK(g_GameMode == OPTION_MODE_ROOT && s_handlerCalls[OPTION_MODE_ROOT] == 1);
+
+    Reset(OPTION_MODE_ROOT);
+    s_optionMenu.letterboxHeight = INT_MIN;
+    UpdateOptionScene();
+    CHECK(s_optionMenu.letterboxHeight == 4 && s_lastTileHeight == 4);
+
+    Reset(OPTION_MODE_ROOT);
+    s_optionMenu.letterboxHeight = INT_MAX;
+    UpdateOptionScene();
+    CHECK(s_optionMenu.letterboxHeight == 240 && s_lastTileHeight == 240);
+
+    Reset(OPTION_MODE_ROOT);
+    g_AnimTimer = INT_MAX;
+    g_SceneTimer = INT_MAX;
+    UpdateOptionScene();
+    CHECK(g_AnimTimer == INT_MIN && g_SceneTimer == INT_MIN);
+    CHECK(s_handlerCalls[OPTION_MODE_ROOT] == 1);
+
+    puts("option scene tests passed");
+    return 0;
+}
+
+OptionMenu *MenuOption(void) { return &s_optionMenu; }

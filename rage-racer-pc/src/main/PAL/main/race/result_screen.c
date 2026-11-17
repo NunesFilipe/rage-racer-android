@@ -1,0 +1,121 @@
+#include <stdio.h>
+#include "game/prim.h"
+#include "game/audio.h"
+#include "game/player_car_internal.h"
+#include "game/race.h"
+#include "game/render.h"
+#include "game/render_internal.h"
+#include "game/screens.h"
+#include "game/state.h"
+#include "game/race_internal.h"
+
+enum { RESULT_INTRO_TEXT_CAPACITY = 48 };
+
+static const ResultPlaceSpriteTable s_placeSprites = {
+    .places = {
+        {0x24, 0x30, 0x00},
+        {0x1a, 0x40, 0x30},
+        {0x1c, 0x38, 0x70},
+    },
+};
+static const u16 s_placeCluts[4] = {0, 30739, 30926, 30925};
+static const ResultPanelClutTable s_panelCluts = {
+    .byPlace = {0, 30803, 30795, 30859},
+};
+static const ResultPlaceBarTable s_placeBarSizes = {
+    .places = {
+        {0xb8, 0x18},
+        {0xb0, 0x1c},
+        {0xa8, 0x24},
+    },
+};
+
+static void DrawResultBackdrop(void) {
+    GameOrderingTableEntry *ot = GamePrimaryOrderingTable(0);
+    s32 courseNameY = ResultCourseNameY(g_GrandPrixMode);
+    u8 *next;
+
+    DrawProportionalText(0xDC, 0x1C, "RESULT", 0x7812);
+    DrawText8x8Trans(
+        0x60, courseNameY,
+        CourseSlot(g_CourseIndex) >= EXTRA_COURSE_SLOT_BASE
+            ? ExtraCourseName(CourseSlot(g_CourseIndex))
+            : g_CourseNames[SeriesCourseIndex()],
+        0x78CC);
+
+    next = AddTilePrim(ot, RENDER_PRIM_CURSOR_AS(u8), 0, 0,
+                       0x140, 0x30, 0x85, 0x15, 0xE);
+    g_RenderState.draw.packetCursor = AddTilePrim(
+        ot, next, 0, 0x30, 0x140, 0x18, 0xF0, 0xF0, 0xF0);
+}
+
+void DrawCourseIntro(void) {
+    DrawProportionalText(0x10, 0x1C, "TIME ATTACK", 0x7812);
+    DrawText8x8Trans(0x10, 0x39, "COURSE IN", 0x78CC);
+    DrawResultBackdrop();
+}
+
+static void DrawClassPlaceBanner(void) {
+    GameOrderingTableEntry *ot = GamePrimaryOrderingTable(0);
+    const ResultPlaceBarPosition *bar =
+        &s_placeBarSizes.places[g_ClassResultPlace - 1];
+    u8 *next = RENDER_PRIM_CURSOR_AS(u8);
+
+    next = GameQueueSprite(ot, next, 0x14, 0x1C, 0x38, 8,
+                           0, 0xE8, 0x78CB);
+    next = GameQueueSprite(ot, next, 0x4C, 0x1C, bar->right, 8,
+                           0x84, bar->left, 0x78CB);
+    next = GameQueueSprite(ot, next, bar->right + 0x4E, 0x1C,
+                           0x30, 8, 0, 0xF0, 0x78CB);
+    g_RenderState.draw.packetCursor = GameQueueSprite(
+        ot, next, bar->right + 0x7C, 0x1C, 0x20, 8,
+        0, 0xF8, 0x78CB);
+}
+
+static void DrawResultPlace(void) {
+    GameOrderingTableEntry *ot = GamePrimaryOrderingTable(0);
+    s32 racePosition = g_PlayerCar.drive.racePosition;
+    const ResultPlaceSpriteLayout *placeSprite;
+    u8 *next;
+
+    DrawResultBackdrop();
+    if (!IsValidRaceResultPlace(racePosition)) {
+        return;
+    }
+    placeSprite = &s_placeSprites.places[racePosition - 1];
+    next = GameQueueSprite(ot, RENDER_PRIM_CURSOR_AS(u8),
+                           0xB4, 0x60, 0x58, 0x38, 0xA8, 0xA8,
+                           s_panelCluts.byPlace[racePosition]);
+    g_RenderState.draw.packetCursor = GameQueueSprite(
+        ot, next, placeSprite->x, 0x5C, placeSprite->width, 0x1C,
+        placeSprite->u, 0xCC, s_placeCluts[racePosition]);
+}
+
+void DrawGrandPrixIntro(s32 drawClassBanner) {
+    char text[RESULT_INTRO_TEXT_CAPACITY];
+    s32 classIndex = g_GrandPrixClass;
+    s32 nameIndex = GrandPrixNameIndex(g_GrandPrixSeries, classIndex);
+    s32 classNumber = GrandPrixClassDisplayNumber(
+        g_GrandPrixSeries, classIndex);
+    const char *grandPrixName = nameIndex >= 0
+        ? g_GrandPrixNames[nameIndex]
+        : NULL;
+
+    if (grandPrixName == NULL) {
+        grandPrixName = "";
+    }
+
+    if (drawClassBanner && IsValidRaceResultPlace(g_ClassResultPlace)) {
+        DrawClassPlaceBanner();
+    }
+
+    snprintf(text, sizeof(text), "CLASS%d %s GRANDPRIX", classNumber,
+             grandPrixName);
+    DrawText8x8Trans(0x10, 0x34, text, 0x78CC);
+
+    snprintf(text, sizeof(text), "ROUND%d IN", g_GrandPrixRound);
+    DrawText8x8Trans(0x10, 0x3C, text, 0x78CC);
+
+    DrawResultPlace();
+    DrawProportionalText(0x10, 0x50, "hai", 0x7812);
+}

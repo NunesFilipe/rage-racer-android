@@ -1,0 +1,118 @@
+#include "game/render.h"
+#include "game/state.h"
+#include "game/render_internal.h"
+#include "game/track_internal.h"
+
+#include <limits.h>
+
+enum {
+    TERRAIN_CELL_SIZE = 2048,
+    TERRAIN_CELL_HALF_SIZE = TERRAIN_CELL_SIZE / 2,
+    VIEW_ANGLE_PER_SCAN_DIRECTION = 128,
+};
+
+static u32 GetCellRegion(s32 cellX, s32 cellZ) {
+    return g_TerrainCellGrid[cellZ * TERRAIN_CELL_GRID_SIZE + cellX] >>
+           TERRAIN_CELL_REGION_SHIFT;
+}
+
+static int IsCellVisibleFromRegion(s32 cellX, s32 cellZ, u32 region) {
+    if (region >= TERRAIN_CELL_REGION_COUNT) {
+        return 0;
+    }
+    return g_CellVisibilityTable[cellZ][cellX] & (1u << region);
+}
+
+static void ClearVisibleCellOutput(void) {
+    s32 index;
+
+    if (g_VisibleCellMask != NULL) {
+        for (index = 0; index < TERRAIN_CELL_GRID_SIZE; index++) {
+            g_VisibleCellMask[index] = 0;
+        }
+    }
+    if (g_VisibleCellList != NULL) {
+        for (index = 0; index < VISIBLE_CELL_COUNT; index++) {
+            g_VisibleCellList[index].cellIndex = -1;
+        }
+    }
+}
+
+static s32 NegatedTimesFour(s32 value) {
+    u32 bits = 0u - (u32)value * 4u;
+
+    return bits <= INT32_MAX
+        ? (s32)bits
+        : -(s32)(UINT32_MAX - bits) - 1;
+}
+
+void BuildVisibleCells(const GameCameraState *camera, s32 near, s32 far) {
+    const s32 cameraX = (u16)camera->x;
+    const s32 cameraZ = (u16)camera->z;
+    const s32 direction =
+        (camera->angleY / VIEW_ANGLE_PER_SCAN_DIRECTION) & 0x1F;
+    const s32 cameraCellX = cameraX / TERRAIN_CELL_SIZE;
+    const s32 cameraCellZ = cameraZ / TERRAIN_CELL_SIZE;
+    u32 cameraRegion;
+    s32 index;
+
+    ClearVisibleCellOutput();
+    if (g_VisibleCellMask == NULL || g_VisibleCellList == NULL ||
+        g_TerrainCellGrid == NULL || g_CellVisibilityTable == NULL) {
+        return;
+    }
+    cameraRegion = GetCellRegion(cameraCellX, cameraCellZ);
+
+    for (index = 0; index < VISIBLE_CELL_COUNT; index++) {
+        VisibleTerrainCell *out = &g_VisibleCellList[index];
+        s32 offset[2];
+        s32 cellX;
+        s32 cellZ;
+        s32 cellIndex;
+        Vec4 worldOffset = {0};
+        Vec4 projected = {0};
+
+        GetVisibleCellScanOffset(direction, index,
+                                 g_RenderState.pass.orderingFlag, offset);
+        cellX = cameraCellX + offset[0];
+        cellZ = cameraCellZ + offset[1];
+        if ((u32)cellX >= TERRAIN_CELL_GRID_SIZE ||
+            (u32)cellZ >= TERRAIN_CELL_GRID_SIZE ||
+            !IsCellVisibleFromRegion(cellX, cellZ, cameraRegion)) {
+            continue;
+        }
+
+        cellIndex =
+            g_TerrainCellGrid[(TERRAIN_CELL_GRID_SIZE - 1 - cellZ) *
+                                  TERRAIN_CELL_GRID_SIZE +
+                              cellX] &
+            TERRAIN_CELL_INDEX_MASK;
+        g_VisibleCellMask[cellZ] |= 1u << cellX;
+        if (cellIndex == TERRAIN_MISSING_CELL_INDEX) {
+            continue;
+        }
+
+        /* Retail uses signed MIPS shifts here. Multiplication has the same
+         * result for this bounded cell/camera range without C's undefined
+         * left-shift-of-negative behaviour. */
+        worldOffset.x =
+            (cellX * TERRAIN_CELL_SIZE -
+             (cameraX - TERRAIN_CELL_HALF_SIZE)) *
+            4;
+        worldOffset.y = NegatedTimesFour(camera->y);
+        worldOffset.z =
+            (cellZ * TERRAIN_CELL_SIZE -
+             (cameraZ - TERRAIN_CELL_HALF_SIZE)) *
+            4;
+        ApplyMatrixLV(&g_RenderState.geometry.matrix, AsWords(&worldOffset),
+                      AsWords(&projected));
+        if (projected.z < near || projected.z > far) {
+            continue;
+        }
+
+        out->x = projected.x;
+        out->y = projected.y;
+        out->z = projected.z;
+        out->cellIndex = cellIndex;
+    }
+}

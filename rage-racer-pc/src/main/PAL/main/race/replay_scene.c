@@ -1,0 +1,71 @@
+#include "game/audio.h"
+#include "game/car.h"
+#include "game/player_car_internal.h"
+#include "game/prim.h"
+#include "game/race.h"
+#include "game/race_internal.h"
+#include "game/render.h"
+#include "game/render_internal.h"
+#include "game/replay_internal.h"
+#include "game/state.h"
+#include "game/track.h"
+#include "game/track_internal.h"
+
+enum {
+    REPLAY_FIRST_FRAME = 1,
+};
+
+static void DrawReplayBadge(void) {
+    GameOrderingTableEntry *base;
+    u8 *next;
+
+    if (!ReplayBadgeVisible(g_SceneTimer, g_SeriesCleared)) {
+        return;
+    }
+
+    base = GamePrimaryOrderingTable(0);
+    next = GameQueueSprite(base, RENDER_PRIM_CURSOR_AS(u8), 0x10, 0x10, 0x48,
+                           0x10, 0, 0x68, 0x780D);
+    g_RenderState.draw.packetCursor = QueueDrawModePrim(base, next, 9);
+}
+
+void UpdateReplayScene(void) {
+    s32 resultCue;
+
+    g_AnimTimer = (s32)((u32)g_AnimTimer + 1u);
+    g_SceneTimer = NextReplaySceneTimer(g_SceneTimer,
+                                        g_Replay.count);
+    resultCue = ReplayResultCue(g_SceneTimer, RaceHasRivals(),
+                                g_SeriesCleared,
+                                g_PlayerCar.drive.racePosition);
+    if (resultCue >= 0) {
+        PlaySoundCue(resultCue);
+    }
+
+    if (UpdateReplayFade()) {
+        return;
+    }
+
+    if (g_Replay.count > 0) {
+        ApplyReplayFrame(g_Replay.read, AsRivalCar(&g_PlayerCar),
+                         g_Cars);
+        g_Replay.read = NextReplayReadCursor(
+            g_Replay.read, g_Replay.count);
+        UpdateReplayCars();
+    }
+    UpdateCamera(&g_Camera, CAMERA_VIEW_TRACK,
+                 AsRivalCar(&g_PlayerCar));
+    g_RenderState.geometry.envMode4 = g_IsEnvironmentMode4;
+    DrawTerrainCellsWide(&g_Camera.view);
+    if (RaceHasRivals()) {
+        DrawCars();
+    }
+    DrawCourseObjects();
+    DrawPresentationCourseScenery(g_SceneTimer, 1, 1);
+    UpdateEnvironment();
+    DrawSkyBackground(&g_Camera.view);
+    DrawReplayBadge();
+    if (g_SceneTimer == REPLAY_FIRST_FRAME) {
+        SetTrackTexturePageNow(g_PlayerCar.trackSection);
+    }
+}

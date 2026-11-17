@@ -1,0 +1,70 @@
+#include "game/car.h"
+#include "game/race.h"
+
+#include <stdio.h>
+
+RaceSession g_RaceSession;
+s32 g_CourseIndex;
+s16 g_GrandPrixSeries;
+s32 g_GrandPrixClass;
+s32 g_PlayerCarIndex;
+CarEntry *g_CarTable;
+u8 g_CarModelBaseIndex[GAME_CAR_COUNT] = {0,4,7,9,14,18,21,23,26,28,29,30,31};
+u8 g_CarModelUnlockBase[GAME_CAR_COUNT] = {1,2,3,0,1,2,3,2,3,4,5,5,5};
+
+#define CHECK(x) do { if (!(x)) { fprintf(stderr, "line %d: %s\n", __LINE__, #x); return 1; } } while (0)
+
+int main(void) {
+    CHECK(CustomRacePerformanceCar(0, 0, 0) == 3);
+    CHECK(CustomRacePerformanceCar(3, 0, 1) == 6);
+    CHECK(CustomRacePerformanceCar(3, 0, 2) == 2);
+    CHECK(CustomRacePerformanceCar(0, 5, 0) == 11);
+    CHECK(CustomRacePerformanceCar(0, 5, 1) == 11);
+    CHECK(CustomRacePerformanceCar(0, 5, 2) == 10);
+    g_RaceSession.course = 0;
+    g_RaceSession.classIndex = 0;
+    CHECK(CustomRacePreviewCar(2) == 2);
+    CHECK(CustomRacePreviewCar(GAME_CAR_COUNT) == 3);
+    CHECK(CustomRaceModelCount(0) == 24);
+    CHECK(CustomRaceModelCount(4) == 24);
+    CHECK(CustomRaceModelCount(5) == 17);
+    for (s32 classIndex = 0; classIndex < 6; ++classIndex) {
+        for (s32 model = 3; model < RACE_CAR_SLOT_COUNT; ++model) {
+            CHECK(CustomRacePerformanceCar(0, classIndex, model) == 3);
+        }
+    }
+
+    g_RaceSession = (RaceSession){RACE_SESSION_CUSTOM, 6, 4, 18};
+    ApplyCustomRaceSelection();
+    CHECK(g_CourseIndex == 2 && g_GrandPrixSeries == 1);
+    CHECK(g_GrandPrixClass == 4 && g_PlayerCarIndex == 3);
+    CHECK(CustomRaceUsesRivalModel() && CustomRaceRivalModel() == 5);
+
+    g_RaceSession.model = 12;
+    ApplyCustomRaceSelection();
+    CHECK(g_PlayerCarIndex == 12 && !CustomRaceUsesRivalModel());
+
+    /* The ovals (slots 3 and 7) have no course data below class 3; the
+     * race falls back to the first course of the same series. */
+    g_RaceSession = (RaceSession){RACE_SESSION_CUSTOM, 7, 1, 0};
+    ApplyCustomRaceSelection();
+    CHECK(g_CourseIndex == 0 && g_GrandPrixSeries == 1 &&
+          g_RaceSession.course == 4);
+    g_RaceSession = (RaceSession){RACE_SESSION_CUSTOM, 3, 2, 0};
+    ApplyCustomRaceSelection();
+    CHECK(g_CourseIndex == 3 && g_GrandPrixSeries == 0 &&
+          g_RaceSession.course == 3);
+
+    /* Extra custom courses keep their slot in g_CourseIndex (8..39) and map
+     * normal (8..39) vs reverse (40..71) into g_GrandPrixSeries (0 vs 1). */
+    g_RaceSession = (RaceSession){RACE_SESSION_CUSTOM, 8, 0, 13};
+    ApplyCustomRaceSelection();
+    CHECK(g_CourseIndex == 8 && g_GrandPrixSeries == 0 &&
+          g_RaceSession.course == 8 && g_PlayerCarIndex == 3);
+    g_RaceSession = (RaceSession){RACE_SESSION_CUSTOM, 40, 0, 13};
+    ApplyCustomRaceSelection();
+    CHECK(g_CourseIndex == 8 && g_GrandPrixSeries == 1 &&
+          g_RaceSession.course == 40 && g_PlayerCarIndex == 3);
+    puts("custom race tests passed");
+    return 0;
+}

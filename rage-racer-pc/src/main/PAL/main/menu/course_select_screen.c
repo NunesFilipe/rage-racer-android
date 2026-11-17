@@ -1,0 +1,512 @@
+/*
+ * The course select screen: where a race is started from.
+ *
+ * The player steps through the courses, picks one of three rows, and from here
+ * either goes racing, backs out to the ranking, or opens the two prompts this
+ * screen owns: saving the game, and changing the Grand Prix class, which
+ * resets their progress through the series and so is asked twice.
+ *
+ * GameMenuBusy tells the states apart: zero while it is idle, one of five
+ * negatives while a prompt is up, and a positive on the way to whichever
+ * screen was chosen.
+ */
+
+#include "game/asset.h"
+#include "game/audio.h"
+#include "game/menu.h"
+#include "game/menu_internal.h"
+#include "game/menu_scripts_internal.h"
+#include "game/race.h"
+#include "game/race_internal.h"
+#include "game/save_internal.h"
+
+enum {
+    COURSE_CARD_REST_WINDOW = MENU_VIEW_OFFSET_MAX - 1,
+    COURSE_CARD_FULL_TURN = 0x1F4000,
+    COURSE_CLASS_CURTAIN_CLOSED = 0x19,
+};
+
+static int CourseCardSettled(void) {
+    return MenuValueWithinWindow(g_MenuViewAngle, g_MenuViewAngleTarget,
+                                 COURSE_CARD_REST_WINDOW);
+}
+
+static s32 CourseBestPlace(s32 course) {
+    if (g_CourseProgress == NULL) {
+        return 0;
+    }
+    return g_CourseProgress->bestPlace[SeriesCourseIndexFor(course)];
+}
+
+static s32 MaxSelectableClass(void) {
+    if (g_RaceSession.kind == RACE_SESSION_CUSTOM) {
+        return GRAND_PRIX_FINAL_CLASS_INDEX;
+    }
+    if (g_RaceProgress == NULL) {
+        return 0;
+    }
+    return AddClampedMenuValue(g_RaceProgress->maxClassReached, 0, 0,
+                               GRAND_PRIX_FINAL_CLASS_INDEX);
+}
+
+/*
+ * Steps to the course either side. Both directions run the same arithmetic on
+ * the view angle and on the card's spin, and differ only in which way the
+ * index moves and where the view is asked to stop.
+ */
+static void BrowseToCourse(CourseSelectScreen *screen, s32 step,
+                           s32 newTarget) {
+    s32 previousTarget = g_MenuViewAngleTarget;
+    s32 previousSpin = screen->cardSpinTarget;
+    s32 course = g_CourseIndex;
+
+    PlaySoundCue(8);
+    g_MenuViewAngleTarget = newTarget;
+    screen->swapDelay = 0;
+    screen->displayedCourse = course;
+    course = SelectableCourseStep(course, step);
+    if (course < 0) {
+        s32 maxCourse = g_RaceSession.kind == RACE_SESSION_CUSTOM
+                            ? CUSTOM_PHYSICAL_COURSE_COUNT - 1
+                            : PHYSICAL_COURSE_COUNT - 1;
+        course = AddClampedMenuValue(g_CourseIndex, step, 0, maxCourse);
+    }
+    g_MenuViewAngle =
+        RebaseCarouselValue(g_MenuViewAngle, previousTarget,
+                            MENU_COURSE_VIEW_REBASE_SPAN);
+    screen->cardSpin =
+        RebaseCarouselValue(screen->cardSpin, previousSpin,
+                            COURSE_CARD_FULL_TURN);
+    g_CourseIndex = course;
+    screen->pendingCourse = course;
+    screen->cardPendingGrade = CourseBestPlace(course);
+    /* Only the extra series shows the time-attack plate. */
+    MenuWidgetState()->timeAttackStep = CourseSeries(course) == 0 ? -1 : 1;
+}
+
+/* Which way out of this screen is reachable is asked three times a frame. */
+static void DrawCourseArrows(s32 step) {
+    s32 previous = CanSelectPrevCourse();
+
+    DrawBrowseArrows(MenuBrowseArrows(), step, 1, previous, CanSelectNextCourse());
+}
+
+static const TimedDrawCommand *CourseSelectMenuScript(void) {
+    if (g_GrandPrixMode != 0 || g_RaceSession.kind == RACE_SESSION_CUSTOM) {
+        return g_CourseSelectGpScript;
+    }
+    return g_CourseSelectTimeAttackScript;
+}
+
+/* The save prompt's two buttons, and the box round whichever is picked. */
+static void DrawSavePromptButtons(const CourseSelectScreen *screen,
+                                  GameOrderingTableEntry *ot, s32 flash) {
+    DrawMenuCursorBox((screen->modalCursor != 0) ? 0xB8 : 0xDA, 0x8C, 0x20, 0x20,
+                      flash);
+    DrawSprite(ot, 0xC0, 0x94, 0x10, 0x10, 0x9D, 0x7C, 0, 0, 0, 0x244, 1, 1,
+               0x3B);
+    DrawSprite(ot, 0xE3, 0x94, 0x10, 0x10, 0xAD, 0x7C, 0, 0, 0, 0x244, 1, 1,
+               0x3B);
+    GameDrawMenuButton(0xB8, 0x8C, 0x20, 0x20, 0x95, 0x25, 0x1E);
+    GameDrawMenuButton(0xDA, 0x8C, 0x20, 0x20, 0x1E, 0x4E, 0x95);
+}
+
+/* One row per class the player has reached, with the cursor on the chosen. */
+static void DrawClassList(const CourseSelectScreen *screen,
+                          GameOrderingTableEntry *ot, s32 flash) {
+    s32 classCount = MaxSelectableClass() + 1;
+    s32 i;
+
+    DrawMenuCursorBox(0xB8, screen->modalCursor * 0x1E + 0x6C, 0x38, 0x20, flash);
+    for (i = 0; i < classCount; i++) {
+        DrawSprite(ot, 0xC0, i * 0x1E + 0x74, 0x1A, 0x10, 0x60, 0xCC, 0, 0, 0,
+                   0x244, 1, 1, 0x3B);
+        DrawSprite(ot, 0xE0, i * 0x1E + 0x74, 8, 0x10, i * 8 + 8, 0x18, 0, 0, 0,
+                   0x244, 1, 1, 0x3B);
+        GameDrawMenuButton(0xB8, i * 0x1E + 0x6C, 0x38, 0x20, 0x95, 0x25, 0x1E);
+    }
+}
+
+/* Leaving the screen downwards, into the race or the ranking: the card spins
+ * back to where the next screen wants it. */
+static void SpinCardAway(CourseSelectScreen *screen) {
+    g_MenuViewOffsetTarget = MENU_VIEW_OFFSET_MAX;
+    screen->cardPendingGrade = 0;
+    screen->cardSpin = RebaseCarouselValue(
+        screen->cardSpin, screen->cardSpinTarget, COURSE_CARD_FULL_TURN);
+}
+
+/* Confirm on the row the cursor is on. */
+static void ChooseCourseSelectRow(CourseSelectScreen *screen, s32 row) {
+    if (row == COURSE_SELECT_OPTION_CAR_SELECT) {
+        if (g_RaceSession.kind == RACE_SESSION_CUSTOM) {
+            g_RaceSession.course = g_CourseIndex;
+            g_RaceSession.classIndex = g_GrandPrixClass;
+            ApplyCustomRaceSelection();
+            g_CourseIndex = g_RaceSession.course;
+            RequestCustomRivalPreviewAssets();
+        }
+        PlaySoundCue(2);
+        GameMenuBusy = COURSE_SELECT_TO_CAR_SELECT;
+        g_MenuOverlayPattern = 1;
+        MenuWidgetState()->timeAttackStep = -1;
+        SpinCardAway(screen);
+        return;
+    }
+    if (row == COURSE_SELECT_OPTION_SAVE_OR_START) {
+        if (g_GrandPrixMode != 0) {
+            /* Saving is only offered in a Grand Prix; class five is the extra
+             * series, which has no round of its own to record. */
+            PlaySoundCue(2);
+            screen->modalScript = g_CourseSelectSavePromptScript;
+            GameMenuBusy = COURSE_SELECT_SAVE_PROMPT;
+            g_GrandPrixSeries = (s16)GrandPrixAssetSeries(
+                g_GrandPrixSeries, g_GrandPrixClass);
+            g_UiScriptProgress2 = 0;
+            screen->modalCursor = 1;
+            return;
+        }
+        PlaySoundCue(3);
+        StartSequenceFadeOut();
+        MenuWidgetState()->hintStep = -1;
+        MenuWidgetState()->timeAttackStep = -1;
+        GameMenuBusy = COURSE_SELECT_TO_RACE;
+        g_GrandPrixSeries = CourseSeries(g_CourseIndex);
+        if (g_RaceSession.kind == RACE_SESSION_CUSTOM) {
+            g_RaceSession.course = g_CourseIndex;
+            g_RaceSession.classIndex = g_GrandPrixClass;
+        }
+        SpinCardAway(screen);
+        return;
+    }
+    PlaySoundCue(2);
+    if (g_GrandPrixMode != 0 || g_RaceSession.kind == RACE_SESSION_CUSTOM) {
+        screen->modalScript = g_MenuDialogPanelLowerScript;
+        GameMenuBusy = COURSE_SELECT_CLASS_PROMPT;
+        g_UiScriptProgress2 = 0;
+        screen->modalCursor = g_GrandPrixClass;
+        return;
+    }
+    GameMenuBusy = COURSE_SELECT_TO_RANKING;
+    g_MenuOverlayPattern = 1;
+    MenuWidgetState()->timeAttackStep = -1;
+}
+
+static void UpdateCourseSelectInput(CourseSelectScreen *screen) {
+    CourseSelectInputOutcome choice;
+    s32 i;
+    g_MenuOverlayPattern = -1;
+    choice = DecideCourseSelectInput(g_PadPressed, g_PadHeld,
+                                     screen->option);
+    for (i = 0; i < choice.cueCount; i++) {
+        PlaySoundCue(choice.cues[i]);
+    }
+    screen->option = choice.option;
+    /* Asked in this order, and each condition only when the one before it
+     * held, because settling the card is a question the screen answers by
+     * looking rather than by remembering. */
+    if (choice.wantsPrev && (CanSelectPrevCourse() != 0) &&
+        CourseCardSettled() && (screen->pendingCourse < 0)) {
+        BrowseToCourse(screen, -1, 0);
+    }
+    if (choice.wantsNext && (CanSelectNextCourse() != 0) &&
+        CourseCardSettled() && (screen->pendingCourse < 0)) {
+        BrowseToCourse(screen, 1, MENU_COURSE_VIEW_RIGHT_TARGET);
+    }
+    if (choice.choosesRow) {
+        ChooseCourseSelectRow(screen, choice.option);
+    }
+}
+
+static void UpdateCourseSelectIdle(CourseSelectScreen *screen) {
+    MenuWidgetState()->hintStep = 1;
+    RunTimedDrawScript(screen->modalScript, &g_UiScriptProgress2, -1);
+    DrawCourseArrows(1);
+    DrawFadingMenuSprites(g_UiScriptProgress, 2, screen->option);
+    RunTimedDrawScript(CourseSelectMenuScript(), &g_UiScriptProgress, 0);
+    DrawMenuLightBurst(MenuWidgetState(), 7);
+    if ((RunTimedDrawScript(g_UiChromeScript, &g_UiScriptProgress, 1) != 0) &&
+        (g_UiScriptProgress2 <= 0)) {
+        UpdateCourseSelectInput(screen);
+    }
+}
+
+static void UpdateSavePrompt(CourseSelectScreen *screen,
+                             GameOrderingTableEntry *ot) {
+    MenuPromptOutcome choice;
+    s32 cue;
+    RunTimedDrawScript(g_CourseSelectSavePromptBanner, &g_UiScriptProgress2, 0);
+    RunTimedDrawScript(g_UiChromeScript2, &g_UiScriptProgress2, 0);
+    if (RunTimedDrawScript(screen->modalScript, &g_UiScriptProgress2, 1)
+        == 0) {
+        return;
+    }
+    choice = DecideSavePrompt(g_PadPressed, GameMenuBusy, screen->confirmTimer,
+                              screen->modalCursor);
+    for (cue = 0; cue < choice.cueCount; cue++) {
+        PlaySoundCue(choice.cues[cue]);
+    }
+    GameMenuBusy = choice.busy;
+    screen->confirmTimer = choice.confirmTimer;
+    screen->modalCursor = (u8)choice.subCursor;
+    DrawSavePromptButtons(screen, ot, 0);
+}
+
+static void UpdateClassPrompt(CourseSelectScreen *screen,
+                              GameOrderingTableEntry *ot) {
+    MenuClassPromptOutcome choice;
+    s32 maxClass;
+    s32 effect;
+    if (RunTimedDrawScript(screen->modalScript, &g_UiScriptProgress2, 1)
+        == 0) {
+        return;
+    }
+    maxClass = MaxSelectableClass();
+    choice = DecideClassPrompt(g_PadPressed, GameMenuBusy, screen->confirmTimer,
+                               screen->modalCursor, g_GrandPrixClass, maxClass,
+                               screen->classChangeApplied);
+    for (effect = 0; effect < choice.effectCount; effect++) {
+        if (choice.effects[effect].kind == MENU_PROMPT_CURTAIN) {
+            DrawClassChangeCurtain(screen, choice.effects[effect].value);
+        } else {
+            PlaySoundCue(choice.effects[effect].value);
+        }
+    }
+    GameMenuBusy = choice.busy;
+    screen->confirmTimer = choice.confirmTimer;
+    screen->classChangeApplied = choice.changeApplied;
+    screen->modalCursor = (u8)choice.subCursor;
+    DrawClassList(screen, ot, 0);
+}
+
+/* The save going through: the prompt flashes for a while, then the screen
+ * starts on its way out, to the race or to the record entry. */
+static void UpdateSaveCountdown(CourseSelectScreen *screen,
+                                GameOrderingTableEntry *ot) {
+    if (screen->confirmTimer > 0) {
+        screen->confirmTimer -= 1;
+        RunTimedDrawScript(g_CourseSelectSavePromptBanner,
+                           &g_UiScriptProgress2, 0);
+        RunTimedDrawScript(g_UiChromeScript2, &g_UiScriptProgress2, 0);
+        RunTimedDrawScript(screen->modalScript, &g_UiScriptProgress2, 1);
+        DrawSavePromptButtons(screen, ot, 1);
+        return;
+    }
+    RunTimedDrawScript(g_CourseSelectSavePromptBanner, &g_UiScriptProgress2,
+                       -1);
+    RunTimedDrawScript(g_UiChromeScript2, &g_UiScriptProgress2, 0);
+    RunTimedDrawScript(screen->modalScript, &g_UiScriptProgress2, 0);
+    if (g_UiScriptProgress2 <= 0) {
+        StartSequenceFadeOut();
+        GameMenuBusy = (screen->modalCursor != 0)
+                           ? COURSE_SELECT_TO_RECORD_ENTRY
+                           : COURSE_SELECT_TO_RACE;
+        MenuWidgetState()->hintStep = -1;
+        SpinCardAway(screen);
+    }
+}
+
+/* The save prompt refused: wait for it to slide off, then go back to idle. */
+static void UpdateSaveDismissed(CourseSelectScreen *screen) {
+    RunTimedDrawScript(g_CourseSelectSavePromptBanner, &g_UiScriptProgress2,
+                       -1);
+    RunTimedDrawScript(g_UiChromeScript2, &g_UiScriptProgress2, 0);
+    RunTimedDrawScript(screen->modalScript, &g_UiScriptProgress2, 0);
+    if (g_UiScriptProgress2 <= 0) {
+        GameMenuBusy = COURSE_SELECT_IDLE;
+    }
+}
+
+/*
+ * Changing class. A curtain draws across, and once it has covered the screen
+ * the new class is applied and the player's progress through the series is
+ * reset; then the curtain comes back and the screen returns to idle.
+ */
+static void UpdateClassChange(CourseSelectScreen *screen,
+                              GameOrderingTableEntry *ot) {
+    if (g_CourseProgress == NULL &&
+        g_RaceSession.kind != RACE_SESSION_CUSTOM) {
+        GameMenuBusy = COURSE_SELECT_IDLE;
+        screen->classChangeApplied = 0;
+        return;
+    }
+    screen->modalCursor = (u8)AddClampedMenuValue(
+        screen->modalCursor, 0, 0, MaxSelectableClass());
+    if (screen->confirmTimer > 0) {
+        screen->confirmTimer -= 1;
+        RunTimedDrawScript(screen->modalScript, &g_UiScriptProgress2, 1);
+        DrawClassList(screen, ot, 1);
+        return;
+    }
+    if (screen->classChangeApplied != 0) {
+        if (DrawClassChangeCurtain(screen, -1) == 0) {
+            GameMenuBusy = COURSE_SELECT_IDLE;
+            g_UiScriptProgress2 = 0;
+        }
+        return;
+    }
+    if (DrawClassChangeCurtain(screen, 1) >= COURSE_CLASS_CURTAIN_CLOSED) {
+        screen->classChangeApplied = 1;
+        g_GrandPrixClass = screen->modalCursor;
+        if (g_RaceSession.kind == RACE_SESSION_CUSTOM) {
+            g_RaceSession.course = g_CourseIndex;
+            g_RaceSession.classIndex = g_GrandPrixClass;
+            ApplyCustomRaceSelection();
+            g_CourseIndex = g_RaceSession.course;
+        } else {
+            ResetCourseProgressState(g_CourseProgress, screen->modalCursor);
+            g_CourseIndex = CourseSeries(g_CourseIndex) * COURSE_SLOT_COUNT;
+        }
+        g_MenuViewAngle = MENU_COURSE_VIEW_REBASE_SPAN;
+        g_MenuViewAngleTarget = MENU_COURSE_VIEW_REBASE_SPAN;
+        screen->option = 0;
+        screen->pendingCourse = -1;
+        screen->cardSpin = 0;
+        screen->displayedCourse = g_CourseIndex;
+        screen->cardPendingGrade = CourseBestPlace(g_CourseIndex);
+    }
+    RunTimedDrawScript(screen->modalScript, &g_UiScriptProgress2, 1);
+    DrawClassList(screen, ot, 1);
+}
+
+static void UpdateCourseSelectModal(CourseSelectScreen *screen,
+                                    GameOrderingTableEntry *ot, s32 state) {
+    switch (state) {
+    case COURSE_SELECT_SAVE_PROMPT:
+        UpdateSavePrompt(screen, ot);
+        break;
+    case COURSE_SELECT_CLASS_PROMPT:
+        UpdateClassPrompt(screen, ot);
+        break;
+    case COURSE_SELECT_SAVE_COUNTDOWN:
+        UpdateSaveCountdown(screen, ot);
+        break;
+    case COURSE_SELECT_SAVE_DISMISSED:
+        UpdateSaveDismissed(screen);
+        break;
+    case COURSE_SELECT_CLASS_CHANGE:
+        UpdateClassChange(screen, ot);
+        break;
+    default:
+        GameMenuBusy = COURSE_SELECT_IDLE;
+        break;
+    }
+    DrawCourseArrows(1);
+    DrawFadingMenuSprites(g_UiScriptProgress, 2, screen->option);
+    RunTimedDrawScript(CourseSelectMenuScript(), &g_UiScriptProgress, 0);
+    RunTimedDrawScript(g_UiChromeScript, &g_UiScriptProgress, 1);
+    DrawMenuLightBurst(MenuWidgetState(), 7);
+}
+
+/* What the race is started with, once the screen has finished sliding off. */
+static s32 HandOverToRace(s32 sceneId, s32 course) {
+    if (g_RaceSession.kind == RACE_SESSION_CUSTOM) {
+        g_RaceSession.course = g_CourseIndex;
+        g_RaceSession.classIndex = g_GrandPrixClass;
+        ApplyCustomRaceSelection();
+        g_SceneId = sceneId;
+        g_CourseIndex = course;
+        return 1;
+    }
+    if (!StoreRaceSelection(g_RaceProgress, g_GrandPrixMode, course,
+                            g_PlayerCarIndex, g_GrandPrixClass, g_PlayerMoney,
+                            g_GrandPrixSeries)) {
+        return 0;
+    }
+    g_SceneId = sceneId;
+    g_CourseIndex = course;
+    return 1;
+}
+
+static void EnterChosenScreen(void) {
+    switch (GameMenuBusy) {
+    case COURSE_SELECT_TO_CAR_SELECT:
+        /* To the car select screen, with the showroom put back at its start. */
+        if (g_MenuViewOffset < MENU_VIEW_OFFSET_MAX) {
+            return;
+        }
+        if (g_RaceSession.kind == RACE_SESSION_CUSTOM) {
+            if (AssetLoadHasFailed()) {
+                ResetAssetLoader();
+                g_MenuViewOffsetTarget = 0;
+                GameMenuBusy = COURSE_SELECT_IDLE;
+                return;
+            }
+            if (!AssetLoadCompletedSuccessfully()) return;
+        }
+        MenuActivateEnteringScreen(MENU_SCREEN_ENTER_CAR_SELECT,
+                                   MENU_SCREEN_CAR_SELECT);
+        DrawOwnedCarCounter(MenuWidgetState(), 0, 0);
+        DrawBrowseArrows(MenuBrowseArrows(), 0, 0, 0, 0);
+        g_CarSwapToIndex = -1;
+        g_MenuViewAngle = 0;
+        g_MenuViewAngleTarget = 0;
+        g_MenuViewOffset = MENU_VIEW_OFFSET_MAX;
+        g_MenuViewOffsetTarget = 0;
+        g_CarSwapFromIndex = g_PlayerCarIndex;
+        MenuCarBrowse()->displayedModel = g_RaceSession.model;
+        MenuCarBrowse()->targetModel = -1;
+        break;
+    case COURSE_SELECT_TO_RACE:
+        if ((MenuOutgoingProgress() > 0) ||
+            (g_MenuViewOffset < MENU_VIEW_OFFSET_MAX)) {
+            return;
+        }
+        if (!HandOverToRace(2, CourseSlot(g_CourseIndex))) {
+            return;
+        }
+        break;
+    case COURSE_SELECT_TO_RANKING:
+        MenuActivateScreen(MENU_SCREEN_RANKING);
+        break;
+    case COURSE_SELECT_TO_RECORD_ENTRY:
+        /* The saved-game route reaches the race through the record screen. */
+        if ((MenuOutgoingProgress() > 0) ||
+            (g_MenuViewOffset < MENU_VIEW_OFFSET_MAX)) {
+            return;
+        }
+        if (!HandOverToRace(0x18, SeriesCourseIndex())) {
+            return;
+        }
+        break;
+    }
+    g_UiScriptProgress = 0;
+    GameMenuBusy = COURSE_SELECT_IDLE;
+}
+
+static void UpdateCourseSelectOutgoing(CourseSelectScreen *screen) {
+    MenuBeginExit(MENU_SCREEN_COURSE_SELECT);
+    DrawCourseArrows(-1);
+    RunTimedDrawScript(CourseSelectMenuScript(), &g_UiScriptProgress, -1);
+    RunTimedDrawScript(g_UiChromeScript, &g_UiScriptProgress, 0);
+    DrawFadingMenuSprites(g_UiScriptProgress, 2, screen->option);
+    DrawMenuLightBurst(MenuWidgetState(), -9);
+    if (g_UiScriptProgress <= 0) {
+        EnterChosenScreen();
+    }
+}
+
+static void UpdateCourseSelect(CourseSelectScreen *screen) {
+    GameOrderingTableEntry *ot = RENDER_OT_BASE;
+    s32 state = GameMenuBusy;
+
+    if (g_GrandPrixMode != 0 || g_RaceSession.kind == RACE_SESSION_CUSTOM) {
+        UpdateAndDrawCourseCard(screen);
+    } else {
+        DrawTimeAttackPlate(MenuWidgetState());
+    }
+    DrawCarNamePlate(MenuWidgetState());
+    DrawMenuCourseView(screen);
+
+    if (state == COURSE_SELECT_IDLE) {
+        UpdateCourseSelectIdle(screen);
+    } else if (state < 0) {
+        UpdateCourseSelectModal(screen, ot, state);
+    } else {
+        UpdateCourseSelectOutgoing(screen);
+    }
+}
+
+void UpdateCourseSelectScreen(void) {
+    UpdateCourseSelect(MenuCourseSelect());
+}

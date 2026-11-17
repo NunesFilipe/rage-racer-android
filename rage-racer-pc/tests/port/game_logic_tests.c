@@ -1,0 +1,645 @@
+#include <stdio.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#include <fcntl.h>
+#define close _close
+#define write _write
+#define unlink _unlink
+#define rmdir _rmdir
+#define mkdir(path, mode) _mkdir(path)
+#define strdup _strdup
+#define TEST_TEMP_PREFIX ""
+#define TEST_SEPARATOR "\\"
+static int mkstemp(char *path) {
+    if (_mktemp_s(path, strlen(path) + 1) != 0) return -1;
+    return _open(path, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY,
+                 _S_IREAD | _S_IWRITE);
+}
+static char *mkdtemp(char *path) {
+    if (_mktemp_s(path, strlen(path) + 1) != 0 || _mkdir(path) != 0) return NULL;
+    return path;
+}
+#else
+#include <unistd.h>
+#define TEST_TEMP_PREFIX "/tmp/"
+#define TEST_SEPARATOR "/"
+#endif
+
+#include <sys/stat.h>
+
+#include "common.h"
+#include "game/diagnostics.h"
+#include "game/random.h"
+#include "game/track.h"
+#include "input_config.h"
+#include "port_config.h"
+#include "runtime_config.h"
+#include "platform_paths.h"
+
+/* Random15 stamps its trace with where the game had got to. The pure logic
+ * library carries no scene state of its own, so the test supplies it. */
+int g_FrameCounter;
+int g_SceneId;
+int g_SceneTimer;
+
+s32 FramesToMilliseconds(s32 frames, s32 millis);
+s32 GetAngleDistance(s32 from, s32 to);
+s32 GetAngleDelta(s32 from, s32 to);
+
+u32 g_RandomSeed;
+const GameTrackPoint *g_TrackPoints;
+s32 g_TrackPointCount;
+
+static int failures;
+
+#define EXPECT_EQ(expected, actual) do {                                      \
+    s32 expected_value = (s32)(expected);                                     \
+    s32 actual_value = (s32)(actual);                                         \
+    if (expected_value != actual_value) {                                     \
+        fprintf(stderr, "%s:%d: expected %d, got %d\n",                     \
+                __FILE__, __LINE__, expected_value, actual_value);             \
+        failures++;                                                           \
+    }                                                                         \
+} while (0)
+
+static void test_time_conversion(void) {
+    EXPECT_EQ(0, FramesToMilliseconds(0, 0));
+    EXPECT_EQ(960, FramesToMilliseconds(24, 0));
+    EXPECT_EQ(1000, FramesToMilliseconds(25, 0));
+    EXPECT_EQ(1234, FramesToMilliseconds(30, 34));
+    EXPECT_EQ(59999, FramesToMilliseconds(1499, 39));
+    EXPECT_EQ(60000, FramesToMilliseconds(1500, 0));
+    EXPECT_EQ(INT_MAX, FramesToMilliseconds(INT_MAX, INT_MAX));
+    EXPECT_EQ(INT_MIN, FramesToMilliseconds(INT_MIN, INT_MIN));
+}
+
+static void test_random15(void) {
+    static const s32 expected[] = {
+        16838, 5758, 10113, 17515, 31051, 5627, 23010, 7419
+    };
+    size_t i;
+
+    g_RandomSeed = 1;
+    for (i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+        EXPECT_EQ(expected[i], Random15());
+    }
+    EXPECT_EQ((s32)0x9CFBAE39, (s32)g_RandomSeed);
+
+    g_RandomSeed = 0;
+    EXPECT_EQ(0, Random15());
+    EXPECT_EQ(0x3039, g_RandomSeed);
+}
+
+static void test_random_selection(void) {
+    u32 seed;
+
+    g_RandomSeed = 1;
+    EXPECT_EQ(54, RandomIndex(100));
+    EXPECT_EQ((s32)0x41C67EA6, (s32)g_RandomSeed);
+
+    seed = g_RandomSeed;
+    EXPECT_EQ(0, RandomIndex(0));
+    EXPECT_EQ(0, RandomIndex(-1));
+    EXPECT_EQ((s32)seed, (s32)g_RandomSeed);
+
+    g_RandomSeed = 1;
+    EXPECT_EQ(6, RandomRange(3, 13));
+    EXPECT_EQ((s32)0x41C67EA6, (s32)g_RandomSeed);
+
+    g_RandomSeed = 1;
+    EXPECT_EQ(7, RandomRange(7, 7));
+    EXPECT_EQ((s32)0x41C67EA6, (s32)g_RandomSeed);
+
+    seed = g_RandomSeed;
+    EXPECT_EQ(9, RandomRange(9, 4));
+    EXPECT_EQ((s32)seed, (s32)g_RandomSeed);
+
+    g_RandomSeed = 1;
+    EXPECT_EQ(INT_MIN + 454, RandomRange(INT_MIN, INT_MAX));
+}
+
+static void test_angle_math(void) {
+    EXPECT_EQ(0, GetAngleDistance(0, 0));
+    EXPECT_EQ(1, GetAngleDistance(0xFFF, 0));
+    EXPECT_EQ(0x800, GetAngleDistance(0, 0x800));
+    EXPECT_EQ(0x123, GetAngleDistance(0xF00, 0x023));
+    EXPECT_EQ(1, GetAngleDistance(0x1000, -1));
+
+    EXPECT_EQ(1, GetAngleDelta(0xFFF, 0));
+    EXPECT_EQ(-1, GetAngleDelta(0, 0xFFF));
+    EXPECT_EQ(0x800, GetAngleDelta(0, 0x800));
+    EXPECT_EQ(-0x800, GetAngleDelta(0x800, 0));
+    EXPECT_EQ(0x7FF, GetAngleDelta(0x801, 0));
+    EXPECT_EQ(-1, GetAngleDelta(0x1000, -1));
+    EXPECT_EQ(0x123, GetAngleDelta(0xF00, 0x023));
+    EXPECT_EQ(-0x123, GetAngleDelta(0x023, 0xF00));
+}
+
+static void test_angle_blending(void) {
+    EXPECT_EQ(0x100, BlendAngle(0x100, 0x900, 0));
+    EXPECT_EQ(0x900, BlendAngle(0x100, 0x900, 0x400));
+    EXPECT_EQ(0, BlendAngle(0xF00, 0x100, 0x200));
+    EXPECT_EQ(0, BlendAngle(0x100, 0xF00, 0x200));
+    EXPECT_EQ(0x800, BlendAngle(0, 0x800, 0x400));
+    EXPECT_EQ(0x123, BlendAngle(0x123, 0x123, INT_MIN));
+}
+
+static void test_track_angle_interpolation(void) {
+    GameTrackPoint points[5] = {0};
+
+    points[0].angle = 0xF00;
+    points[1].angle = 0x100;
+    points[2].angle = 0x500;
+    points[3].angle = 0x500;
+    points[4].angle = 0x700;
+    g_TrackPoints = points;
+    g_TrackPointCount = 3;
+
+    EXPECT_EQ(0, InterpolateTrackAngle(0, 0x200));
+    EXPECT_EQ(0x300, InterpolateTrackAngle(1, 0x200));
+    EXPECT_EQ(0x200, InterpolateTrackAngle(2, 0x200));
+    EXPECT_EQ(0x100, InterpolateTrackAngle(INT_MAX, 0x200));
+
+    g_TrackPointCount = 5;
+    points[2].angle = 0x300;
+    EXPECT_EQ(0x280, SmoothTrackAngle(0, 0x200));
+    EXPECT_EQ(0x4C0, SmoothTrackAngle(2, 0x200));
+
+    g_TrackPoints = NULL;
+    EXPECT_EQ(0, InterpolateTrackAngle(0, 0x200));
+    EXPECT_EQ(0, SmoothTrackAngle(0, 0x200));
+    g_TrackPoints = points;
+    g_TrackPointCount = 0;
+    EXPECT_EQ(0, InterpolateTrackAngle(0, 0x200));
+}
+
+static void test_track_point_interpolation(void) {
+    GameTrackPoint points[2] = {0};
+    LVec out = {99, 99, 99};
+
+    points[0].x = 10;
+    points[0].y = 20;
+    points[0].z = 30;
+    points[1].x = -10;
+    points[1].y = -20;
+    points[1].z = -30;
+    g_TrackPoints = points;
+    g_TrackPointCount = 2;
+
+    InterpolateTrackPoint(0, &out, 0x200);
+    EXPECT_EQ(0, out.x);
+    EXPECT_EQ(0, out.y);
+    EXPECT_EQ(0, out.z);
+
+    InterpolateTrackPoint(1, &out, 0x100);
+    EXPECT_EQ(-5, out.x);
+    EXPECT_EQ(-5, out.y);
+    EXPECT_EQ(-15, out.z);
+
+    points[0].x = INT_MAX;
+    points[0].y = SHRT_MIN;
+    points[0].z = INT_MAX;
+    points[1] = points[0];
+    InterpolateTrackPoint(INT_MAX, &out, INT_MAX);
+    EXPECT_EQ(-1, out.x);
+    EXPECT_EQ(-16384, out.y);
+    EXPECT_EQ(-1, out.z);
+
+    points[0].x = points[1].x = 10;
+    points[0].y = points[1].y = 20;
+    points[0].z = points[1].z = 30;
+    InterpolateTrackPoint(0, &out, INT_MIN);
+    EXPECT_EQ(10, out.x);
+    EXPECT_EQ(10, out.y);
+    EXPECT_EQ(30, out.z);
+
+    g_TrackPoints = NULL;
+    InterpolateTrackPoint(0, &out, 0x200);
+    EXPECT_EQ(0, out.x);
+    EXPECT_EQ(0, out.y);
+    EXPECT_EQ(0, out.z);
+    InterpolateTrackPoint(0, NULL, 0x200);
+}
+
+static void test_input_config(void) {
+    RageInputConfig config;
+    char path[] = TEST_TEMP_PREFIX "rage-input-test-XXXXXX";
+    const char contents[] = "# custom controls\nUP = I\nCROSS=Space\nUNKNOWN=K\nLEFT=\n";
+    int fd;
+
+    InputConfigDefaults(&config);
+    EXPECT_EQ(12, InputButtonIndex("UP"));
+    EXPECT_EQ(-1, InputButtonIndex("up"));
+    EXPECT_EQ(-1, InputButtonIndex(NULL));
+    EXPECT_EQ(0, strcmp(config.keys[12], "Up"));
+    EXPECT_EQ(0, InputConfigLoad(&config, "/path/which/does/not/exist"));
+    EXPECT_EQ(0, InputConfigLoad(&config, NULL));
+    EXPECT_EQ(0, InputConfigLoad(NULL, path));
+    EXPECT_EQ(0, InputConfigApplyRuntime(NULL));
+
+    fd = mkstemp(path);
+    if (fd < 0 || write(fd, contents, sizeof(contents) - 1) != sizeof(contents) - 1) {
+        failures++;
+    } else {
+        close(fd);
+        EXPECT_EQ(2, InputConfigLoad(&config, path));
+        EXPECT_EQ(0, strcmp(config.keys[12], "I"));
+        EXPECT_EQ(0, strcmp(config.keys[6], "Space"));
+        EXPECT_EQ(0, strcmp(config.keys[15], "Left"));
+        unlink(path);
+    }
+    {
+        char longPath[] = TEST_TEMP_PREFIX "rage-input-long-test-XXXXXX";
+        char contents[261];
+        int longFd = mkstemp(longPath);
+
+        contents[0] = '#';
+        memset(contents + 1, 'x', 254);
+        memcpy(contents + 255, "UP=J\n", 6);
+        if (longFd < 0 ||
+            write(longFd, contents, sizeof(contents)) != sizeof(contents)) {
+            failures++;
+        } else {
+            close(longFd);
+            EXPECT_EQ(0, InputConfigLoad(&config, longPath));
+            EXPECT_EQ(0, strcmp(config.keys[12], "I"));
+            unlink(longPath);
+        }
+    }
+}
+
+static void test_port_config(void) {
+    RagePortConfig config;
+    char path[] = TEST_TEMP_PREFIX "rage-port-test-XXXXXX";
+    const char contents[] =
+        "# video settings\n"
+        "[video]\n"
+        "renderer = modern\n"
+        "internal_scale = 3.5\n"
+        "aspect = 16:9\n"
+        "fps = 120\n"
+        "texture_filter = linear\n"
+        "post = fxaa\n"
+        "bloom = on\n"
+        "grading = vibrant\n"
+        "draw_distance = nonsense\n"
+        "unknown.key = 1\n";
+    int fd;
+
+    PortConfigDefaults(NULL);
+    EXPECT_EQ(0, PortConfigApplyRuntime(NULL));
+    PortConfigSetActive(NULL);
+    PortConfigDefaults(&config);
+    EXPECT_EQ(RAGE_RENDERER_MODERN, config.renderer);
+    EXPECT_EQ(RAGE_MODERN_FPS_VSYNC, config.modernFps);
+    fd = mkstemp(path);
+    if (fd < 0 || write(fd, contents, sizeof(contents) - 1) != sizeof(contents) - 1) {
+        failures++;
+    } else {
+        char *arguments[] = {"rage-test", "--config", path};
+        close(fd);
+        EXPECT_EQ(1, RuntimeConfigInit(3, arguments));
+        EXPECT_EQ(8, PortConfigApplyRuntime(&config));
+        EXPECT_EQ(RAGE_RENDERER_MODERN, config.renderer);
+        EXPECT_EQ(RAGE_MODERN_ASPECT_16_9, config.modernAspect);
+        EXPECT_EQ(120, config.modernFps);
+        EXPECT_EQ(1, config.modernTextureFilterLinear);
+        EXPECT_EQ(RAGE_MODERN_POST_FXAA, config.modernPost);
+        EXPECT_EQ(1, config.modernGrading);
+        EXPECT_EQ(35, (s32)(config.modernInternalScale * 10.0f));
+        /* invalid value keeps the default */
+        EXPECT_EQ(10, (s32)(config.modernDrawDistance * 10.0f));
+        {
+            char *classicArguments[] = {
+                "rage-test", "--config", path, "--set", "video.renderer=classic"};
+            EXPECT_EQ(1, RuntimeConfigInit(5, classicArguments));
+            PortConfigApplyRuntime(&config);
+            EXPECT_EQ(RAGE_RENDERER_CLASSIC, config.renderer);
+        }
+        {
+            const char *values[] = {"video.aspect=21:9", "video.aspect=32:9"};
+            const RageModernAspect expected[] = {
+                RAGE_MODERN_ASPECT_21_9, RAGE_MODERN_ASPECT_32_9};
+            for (int i = 0; i < 2; ++i) {
+                char *args[] = {"rage-test", "--config", path, "--set", (char *)values[i]};
+                EXPECT_EQ(1, RuntimeConfigInit(5, args));
+                PortConfigApplyRuntime(&config);
+                EXPECT_EQ(expected[i], config.modernAspect);
+            }
+        }
+        unlink(path);
+    }
+    {
+        RagePortConfig zeroDistance;
+        /* Without an explicit --config, Init falls back to whatever
+         * rage-port.ini it can find near the binary, and the one shipped in
+         * the repository sets every video key. Point these cases at an empty
+         * file so they measure their own --set rather than the environment. */
+        char emptyPath[] = TEST_TEMP_PREFIX "rage-empty-XXXXXX";
+        int emptyFd = mkstemp(emptyPath);
+        char *zeroArguments[] = {
+            "rage-test", "--config", emptyPath, "--set", "video.draw_distance=0"};
+        char *booleanArguments[] = {
+            "rage-test", "--set", "feature.enabled=False"};
+        char *invalidSet[] = {"rage-test", "--set", "broken"};
+        char *missingConfig[] = {
+            "rage-test", "--config", "/path/which/does/not/exist"};
+        PortConfigDefaults(&zeroDistance);
+        if (emptyFd >= 0) close(emptyFd);
+        EXPECT_EQ(1, RuntimeConfigInit(5, zeroArguments));
+        EXPECT_EQ(1, PortConfigApplyRuntime(&zeroDistance));
+        EXPECT_EQ(0, (s32)(zeroDistance.modernDrawDistance * 10.0f));
+        EXPECT_EQ(1, RuntimeConfigInit(3, booleanArguments));
+        EXPECT_EQ(0, RuntimeConfigEnabled("feature.enabled"));
+        EXPECT_EQ(0, RuntimeConfigInit(3, invalidSet));
+        EXPECT_EQ(0, RuntimeConfigInit(3, missingConfig));
+        unlink(emptyPath);
+    }
+    {
+        RagePortConfig invalidFloat;
+        char emptyPath[] = TEST_TEMP_PREFIX "rage-empty-XXXXXX";
+        int emptyFd = mkstemp(emptyPath);
+        char *arguments[] = {
+            "rage-test", "--config", emptyPath,
+            "--set", "video.internal_scale=nan",
+            "--set", "video.draw_distance=inf"};
+
+        PortConfigDefaults(&invalidFloat);
+        if (emptyFd >= 0) close(emptyFd);
+        EXPECT_EQ(1, RuntimeConfigInit(7, arguments));
+        EXPECT_EQ(0, PortConfigApplyRuntime(&invalidFloat));
+        EXPECT_EQ(40, (s32)(invalidFloat.modernInternalScale * 10.0f));
+        EXPECT_EQ(10, (s32)(invalidFloat.modernDrawDistance * 10.0f));
+        unlink(emptyPath);
+    }
+    EXPECT_EQ(0x14000, PortMirrorFarDepth(INT_MAX));
+    EXPECT_EQ(0x1000, PortMirrorFarDepth(INT_MIN));
+}
+
+static void test_diagnostic_integer_values(void) {
+    char *valid[] = {
+        "rage-test", "--set", "diagnostics.test_number=0x2a"};
+    char *negative[] = {
+        "rage-test", "--set", "diagnostics.test_number=-17"};
+    char *trailing[] = {
+        "rage-test", "--set", "diagnostics.test_number=12frames"};
+    char *overflow[] = {
+        "rage-test", "--set",
+        "diagnostics.test_number=999999999999999999999999999999"};
+    char *missing[] = {"rage-test"};
+    int parsed = 91;
+
+    EXPECT_EQ(1, RuntimeParseInt("0x2a", 0, 0, 100, &parsed));
+    EXPECT_EQ(42, parsed);
+    EXPECT_EQ(1, RuntimeParseInt("-17", 10, -20, 20, &parsed));
+    EXPECT_EQ(-17, parsed);
+    EXPECT_EQ(0, RuntimeParseInt("0x2a", 10, 0, 100, &parsed));
+    EXPECT_EQ(0, RuntimeParseInt("12frames", 10, 0, 100, &parsed));
+    EXPECT_EQ(0, RuntimeParseInt("999999999999999999999999", 10,
+                                 INT_MIN, INT_MAX, &parsed));
+    EXPECT_EQ(0, RuntimeParseInt("101", 10, 0, 100, &parsed));
+    EXPECT_EQ(0, RuntimeParseInt(NULL, 10, 0, 100, &parsed));
+    EXPECT_EQ(0, RuntimeParseInt("1", 10, 0, 100, NULL));
+    EXPECT_EQ(-17, parsed);
+
+    EXPECT_EQ(1, RuntimeConfigInit(3, valid));
+    EXPECT_EQ(42, DiagnosticsIntValue("test_number", -1));
+    EXPECT_EQ(1, RuntimeConfigInit(3, negative));
+    EXPECT_EQ(-17, DiagnosticsIntValue("test_number", 4));
+    EXPECT_EQ(1, RuntimeConfigInit(3, trailing));
+    EXPECT_EQ(7, DiagnosticsIntValue("test_number", 7));
+    EXPECT_EQ(1, RuntimeConfigInit(3, overflow));
+    EXPECT_EQ(9, DiagnosticsIntValue("test_number", 9));
+    EXPECT_EQ(12, RuntimeConfigInt("diagnostics.test_number", 12, 0, 100));
+    EXPECT_EQ(1, RuntimeConfigInit(1, missing));
+    EXPECT_EQ(11, DiagnosticsIntValue("test_number", 11));
+    EXPECT_EQ(13, DiagnosticsIntValue(NULL, 13));
+    EXPECT_EQ(17, DiagnosticsIntValue("", 17));
+    EXPECT_EQ(0, RuntimeConfigInit(1, NULL));
+    EXPECT_EQ(0, RuntimeConfigInit(-1, missing));
+    EXPECT_EQ(1, RuntimeConfigInit(1, missing));
+    EXPECT_EQ(1, RuntimeConfigGet(NULL) == NULL);
+    EXPECT_EQ(1, RuntimeConfigGet("") == NULL);
+    EXPECT_EQ(1, RuntimeConfigGetForced(NULL) == NULL);
+    EXPECT_EQ(19, RuntimeConfigInt(NULL, 19, 0, 100));
+    EXPECT_EQ(23, RuntimeConfigInt("missing", 23, 100, 0));
+    {
+        char setting[1300];
+        char *arguments[] = {"rage-test", "--set", setting};
+
+        memset(setting, 'x', sizeof(setting));
+        setting[1] = '=';
+        setting[sizeof(setting) - 1] = '\0';
+        EXPECT_EQ(0, RuntimeConfigInit(3, arguments));
+    }
+}
+
+static void test_platform_config_path(void) {
+    char root[] = TEST_TEMP_PREFIX "rage-path-test-XXXXXX";
+    char directory[256], filePath[320], found[320];
+#ifdef _WIN32
+    const char *previous = getenv("APPDATA");
+#elif defined(__APPLE__)
+    const char *previous = getenv("HOME");
+#else
+    const char *previous = getenv("XDG_CONFIG_HOME");
+#endif
+    char *saved = previous != NULL ? strdup(previous) : NULL;
+    FILE *file;
+    if (mkdtemp(root) == NULL) {
+        failures++;
+        return;
+    }
+#ifdef _WIN32
+    snprintf(directory, sizeof(directory), "%s\\Rage Racer", root);
+    _putenv_s("APPDATA", root);
+#elif defined(__APPLE__)
+    snprintf(directory, sizeof(directory), "%s/Library", root);
+    mkdir(directory, 0700);
+    snprintf(directory, sizeof(directory), "%s/Library/Application Support",
+             root);
+    mkdir(directory, 0700);
+    snprintf(directory, sizeof(directory),
+             "%s/Library/Application Support/Rage Racer", root);
+    setenv("HOME", root, 1);
+#else
+    snprintf(directory, sizeof(directory), "%s/rage-racer", root);
+    setenv("XDG_CONFIG_HOME", root, 1);
+#endif
+    snprintf(filePath, sizeof(filePath), "%s" TEST_SEPARATOR "rage-port.ini", directory);
+    if (mkdir(directory, 0700) != 0 || (file = fopen(filePath, "wb")) == NULL) {
+        failures++;
+    } else {
+        fclose(file);
+        EXPECT_EQ(1, PlatformFindConfigFile(NULL, "rage-port.ini", found,
+                                                sizeof(found)));
+        EXPECT_EQ(0, strcmp(filePath, found));
+        snprintf(filePath, sizeof(filePath), "%s/directory-only.ini",
+                 directory);
+        mkdir(filePath, 0700);
+        EXPECT_EQ(0, PlatformFindConfigFile(NULL, "directory-only.ini", found,
+                                            sizeof(found)));
+        rmdir(filePath);
+    }
+    strcpy(found, "stale");
+    EXPECT_EQ(0, PlatformFindConfigFile(NULL, NULL, found, sizeof(found)));
+    EXPECT_EQ('\0', found[0]);
+    EXPECT_EQ(0, PlatformFindConfigFile(NULL, "rage-port.ini", NULL, 0));
+    strcpy(found, "stale");
+    EXPECT_EQ(0, PlatformUserConfigPath(NULL, found, sizeof(found)));
+    EXPECT_EQ('\0', found[0]);
+    {
+        char tiny[2] = "x";
+
+        EXPECT_EQ(0, PlatformUserConfigDirectory(tiny, sizeof(tiny)));
+        EXPECT_EQ('\0', tiny[0]);
+        strcpy(tiny, "x");
+        EXPECT_EQ(0, PlatformUserStateDirectory(tiny, sizeof(tiny)));
+        EXPECT_EQ('\0', tiny[0]);
+    }
+    EXPECT_EQ(0, PlatformEnsureDirectory(NULL));
+    if (saved != NULL) {
+#ifdef _WIN32
+        _putenv_s("APPDATA", saved);
+#elif defined(__APPLE__)
+        setenv("HOME", saved, 1);
+#else
+        setenv("XDG_CONFIG_HOME", saved, 1);
+#endif
+        free(saved);
+    } else {
+#ifdef _WIN32
+        _putenv_s("APPDATA", "");
+#elif defined(__APPLE__)
+        unsetenv("HOME");
+#else
+        unsetenv("XDG_CONFIG_HOME");
+#endif
+    }
+    snprintf(filePath, sizeof(filePath), "%s" TEST_SEPARATOR "rage-port.ini", directory);
+    unlink(filePath);
+    rmdir(directory);
+#ifdef __APPLE__
+    snprintf(directory, sizeof(directory), "%s/Library/Application Support",
+             root);
+    rmdir(directory);
+    snprintf(directory, sizeof(directory), "%s/Library", root);
+    rmdir(directory);
+#endif
+    rmdir(root);
+}
+
+static int TouchFile(const char *path) {
+    FILE *file = fopen(path, "wb");
+
+    if (file == NULL) return 0;
+    fclose(file);
+    return 1;
+}
+
+static void test_portable_state_path(void) {
+    char root[] = TEST_TEMP_PREFIX "rage-portable-state-test-XXXXXX";
+    char executable[320], bundleExecutable[320], card[326], found[320];
+    char save[352];
+
+    if (mkdtemp(root) == NULL) {
+        failures++;
+        return;
+    }
+    snprintf(executable, sizeof(executable), "%s/game", root);
+    mkdir(executable, 0700);
+    strcpy(found, "stale");
+    EXPECT_EQ(0, PlatformExistingPortableStateDirectory(
+                     executable, found, sizeof(found)));
+    EXPECT_EQ('\0', found[0]);
+    strcpy(found, "stale");
+    EXPECT_EQ(0, PlatformExistingPortableStateDirectory(
+                     NULL, found, sizeof(found)));
+    EXPECT_EQ('\0', found[0]);
+    snprintf(card, sizeof(card), "%s/bu00", executable);
+    mkdir(card, 0700);
+    /* An empty card directory is not a portable install: the per-user
+     * state root must keep winning until real saves live beside the game. */
+    strcpy(found, "stale");
+    EXPECT_EQ(0, PlatformExistingPortableStateDirectory(
+                     executable, found, sizeof(found)));
+    EXPECT_EQ('\0', found[0]);
+    snprintf(save, sizeof(save), "%s/BASLUS-00000RAGE", card);
+    EXPECT_EQ(1, TouchFile(save));
+    EXPECT_EQ(1, PlatformExistingPortableStateDirectory(
+                     executable, found, sizeof(found)));
+    EXPECT_EQ(0, strcmp(executable, found));
+    unlink(save);
+    rmdir(card);
+
+    snprintf(bundleExecutable, sizeof(bundleExecutable),
+             "%s/Rage Racer.app/Contents/MacOS", root);
+    snprintf(card, sizeof(card), "%s/bu00", root);
+    mkdir(card, 0700);
+    snprintf(save, sizeof(save), "%s/BASLUS-00000RAGE", card);
+    EXPECT_EQ(1, TouchFile(save));
+    EXPECT_EQ(1, PlatformExistingPortableStateDirectory(
+                     bundleExecutable, found, sizeof(found)));
+    EXPECT_EQ(0, strcmp(root, found));
+    unlink(save);
+    rmdir(card);
+    rmdir(executable);
+    rmdir(root);
+}
+
+static void test_ensure_directory(void) {
+    char root[] = TEST_TEMP_PREFIX "rage-directory-test-XXXXXX";
+    char filePath[320];
+    char nestedPath[320];
+    FILE *file;
+
+    if (mkdtemp(root) == NULL) {
+        failures++;
+        return;
+    }
+    snprintf(filePath, sizeof(filePath), "%s/not-a-directory", root);
+    file = fopen(filePath, "wb");
+    if (file == NULL) {
+        failures++;
+    } else {
+        fclose(file);
+        EXPECT_EQ(0, PlatformEnsureDirectory(filePath));
+    }
+    snprintf(nestedPath, sizeof(nestedPath), "%s/one/two", root);
+    EXPECT_EQ(1, PlatformEnsureDirectory(nestedPath));
+    EXPECT_EQ(1, PlatformEnsureDirectory(nestedPath));
+    rmdir(nestedPath);
+    snprintf(nestedPath, sizeof(nestedPath), "%s/one", root);
+    rmdir(nestedPath);
+    unlink(filePath);
+    rmdir(root);
+}
+
+int main(void) {
+    test_time_conversion();
+    test_random15();
+    test_random_selection();
+    test_angle_math();
+    test_angle_blending();
+    test_track_angle_interpolation();
+    test_track_point_interpolation();
+    test_input_config();
+    test_port_config();
+    test_diagnostic_integer_values();
+    test_platform_config_path();
+    test_portable_state_path();
+    test_ensure_directory();
+
+    if (failures != 0) {
+        fprintf(stderr, "%d characterization assertion(s) failed\n", failures);
+        return EXIT_FAILURE;
+    }
+
+    puts("game logic characterization tests passed");
+    return EXIT_SUCCESS;
+}

@@ -1,0 +1,172 @@
+#include "common.h"
+#include "game/course_index.h"
+#include "game/menu.h"
+#include "game/menu_internal.h"
+#include "game/player_car_internal.h"
+#include "game/race.h"
+#include "game/save_internal.h"
+#include "game/state.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static MenuWidgets s_menuWidgets;
+
+extern s32 g_MenuHandlerIndex;
+extern s32 g_MenuOutgoingHandlerIndex;
+extern s32 g_MenuScreen;
+
+void MenuActivateScreen(s32 screen) {
+    g_MenuScreen = screen;
+    g_MenuHandlerIndex = screen;
+}
+
+s32 g_CourseIndex;
+RaceSession g_RaceSession;
+CourseProgressState *g_CourseProgress;
+s32 g_MenuHandlerIndex;
+s32 g_MenuScreen;
+s32 g_MenuViewAngle;
+s32 g_MenuViewAngleTarget;
+s32 g_MenuViewOffset;
+s32 g_MenuViewOffsetTarget;
+static s32 s_menuCarRotationStarted;
+
+void StartMenuCarRotation(void) { s_menuCarRotationStarted = 1; }
+PlayerCarRuntime g_PlayerCar;
+s32 g_SceneTimer;
+TeamLogoCanvas g_TeamLogoCanvas;
+u16 g_TeamLogoClut[16];
+Rect g_TeamLogoClutRect;
+Rect g_TeamLogoRect;
+u8 g_TeamNameChars[16];
+u8 g_TeamNameLength;
+s32 g_UiScriptProgress;
+
+static s32 s_assetRequestResult;
+static s32 s_arrowCalls;
+static s32 s_imageLoads;
+static s32 s_sequenceCalls;
+static s32 s_teamNameUploads;
+static s32 s_teamLogoClutUploads;
+static PlayerCarRuntime s_playerBefore;
+
+s32 RequestCarSelectAssets(void) { return s_assetRequestResult; }
+void PlaySequence(void) { s_sequenceCalls++; }
+static BrowseArrows s_browseArrows;
+static CourseSelectScreen s_courseSelect;
+BrowseArrows *MenuBrowseArrows(void) { return &s_browseArrows; }
+CourseSelectScreen *MenuCourseSelect(void) { return &s_courseSelect; }
+
+void DrawBrowseArrows(BrowseArrows *arrows, s32 step, s32 wide, s32 left, s32 right) {
+    (void)arrows;
+    (void)step;
+    (void)wide;
+    (void)left;
+    (void)right;
+    s_arrowCalls++;
+}
+#undef LoadImage
+int LoadImage(RECT *rect, u_long *data) {
+    (void)rect;
+    (void)data;
+    s_imageLoads++;
+    return 0;
+}
+void UploadTeamNameTexture(const u8 *text, s32 length) {
+    (void)text;
+    (void)length;
+    s_teamNameUploads++;
+}
+void UploadTeamLogoClut(void) { s_teamLogoClutUploads++; }
+
+#define CHECK(condition)                                                       \
+    do {                                                                       \
+        if (!(condition)) {                                                    \
+            fprintf(stderr, "check failed at line %d: %s\n", __LINE__,       \
+                    #condition);                                               \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+static void PoisonState(void) {
+    memset(&g_PlayerCar, 0x5A, sizeof(g_PlayerCar));
+    s_playerBefore = g_PlayerCar;
+    g_MenuHandlerIndex = -7;
+    g_MenuScreen = -8;
+    g_MenuViewAngle = -1;
+    g_MenuViewAngleTarget = -1;
+    g_MenuViewOffset = -1;
+    g_MenuViewOffsetTarget = -1;
+    s_menuCarRotationStarted = 0;
+    g_UiScriptProgress = -1;
+    s_courseSelect.cardSpin = -1;
+    s_courseSelect.cardSpinTarget = -1;
+    s_courseSelect.cardPendingGrade = -1;
+    s_menuWidgets.timeAttackStep = 0;
+    s_arrowCalls = 0;
+    s_imageLoads = 0;
+    s_sequenceCalls = 0;
+    s_teamNameUploads = 0;
+    s_teamLogoClutUploads = 0;
+}
+
+static int CheckShowroomReset(s32 expectedGrade, s32 expectedPlateStep) {
+    CHECK(g_MenuHandlerIndex == MENU_SCREEN_COURSE_SELECT);
+    CHECK(g_MenuScreen == MENU_SCREEN_COURSE_SELECT);
+    CHECK(g_MenuViewOffset == 250000 && g_MenuViewOffsetTarget == 0);
+    CHECK(g_MenuViewAngle == MENU_COURSE_VIEW_REBASE_SPAN);
+    CHECK(g_MenuViewAngleTarget == MENU_COURSE_VIEW_REBASE_SPAN);
+    CHECK(s_menuCarRotationStarted && g_UiScriptProgress == 0);
+    CHECK(s_courseSelect.cardSpin == 2048000 && s_courseSelect.cardSpinTarget == 0);
+    CHECK(s_courseSelect.cardPendingGrade == expectedGrade);
+    CHECK(s_menuWidgets.timeAttackStep == expectedPlateStep);
+    CHECK(memcmp(&g_PlayerCar, &s_playerBefore, sizeof(g_PlayerCar)) == 0);
+    CHECK(s_sequenceCalls == 1 && s_arrowCalls == 1);
+    CHECK(s_imageLoads == 1 && s_teamLogoClutUploads == 1 &&
+          s_teamNameUploads == 1);
+    return 0;
+}
+
+int main(void) {
+    CourseProgressState progress = {{4, 3, 2, 1}, 0, 0};
+
+    g_CourseProgress = &progress;
+    PoisonState();
+    g_SceneTimer = 8;
+    s_assetRequestResult = 1;
+    EnterCourseSelectScreen();
+    CHECK(g_MenuHandlerIndex == -7 && g_MenuScreen == -8);
+    CHECK(s_sequenceCalls == 0 && s_arrowCalls == 0 && s_imageLoads == 0 &&
+          s_teamLogoClutUploads == 0 && s_teamNameUploads == 0);
+
+    PoisonState();
+    g_CourseIndex = 2;
+    g_SceneTimer = 0;
+    s_assetRequestResult = 0;
+    EnterCourseSelectScreen();
+    if (CheckShowroomReset(2, -1)) return 1;
+
+    PoisonState();
+    g_CourseIndex = 5;
+    EnterCourseSelectScreen();
+    if (CheckShowroomReset(3, 1)) return 1;
+
+    PoisonState();
+    g_CourseIndex = INT32_MIN;
+    g_CourseProgress = NULL;
+    EnterCourseSelectScreen();
+    CHECK(g_CourseIndex == 0);
+    if (CheckShowroomReset(0, -1)) return 1;
+
+    PoisonState();
+    g_CourseIndex = INT32_MAX;
+    EnterCourseSelectScreen();
+    CHECK(g_CourseIndex == PHYSICAL_COURSE_COUNT - 1);
+    if (CheckShowroomReset(0, 1)) return 1;
+
+    puts("enter course select tests passed");
+    return 0;
+}
+
+MenuWidgets *MenuWidgetState(void) { return &s_menuWidgets; }

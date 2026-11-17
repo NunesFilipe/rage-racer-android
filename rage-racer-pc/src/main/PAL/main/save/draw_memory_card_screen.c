@@ -1,0 +1,57 @@
+#include "game/prim.h"
+#include "game/render_internal.h"
+#include "game/memcard.h"
+#include "game/memcard_internal.h"
+#include "game/menu.h"
+
+void DrawMemoryCardScreen(s32 showSlotBar, s32 fromLoadMenu,
+                          s32 selectedRow, s32 selectedSlot) {
+    GameOrderingTableEntry *base;
+    u8 *next;
+    s32 i;
+    s32 y;
+
+    if (g_DrawBuffer == NULL || g_RenderState.draw.packetCursor == NULL) return;
+    base = GamePrimaryOrderingTable(51);
+    next = RENDER_PRIM_CURSOR_AS(u8);
+
+    next = GameQueueSpriteTrans(
+        base, next, 0x24, 0x38, 0x20, 0x18, 0xA0, 0x90, 0x7F40);
+    if (fromLoadMenu != 0) {
+        next = GameQueueSpriteTrans(
+            base, next, 0x24, 0x58, 0x24, 0x18, 0xCC, 0x90, 0x7F40);
+    }
+    y = fromLoadMenu != 0 ? 0x78 : 0x58;
+    next = GameQueueSpriteTrans(
+        base, next, 0x24, y, 0x1C, 0x18, 0xD0, 0x60, 0x7F40);
+    next = GameQueueSpriteTrans(
+        base, next, 0x48, 0xB8, 0x10, 0x10, 0, 0xC8, 0x7F40);
+    next = GameQueueSpriteTrans(
+        base, next, 0x68, 0xB8, 0x34, 0x10, 0x10, 0xC8, 0x7F40);
+    next = GameQueueSpriteTrans(
+        base, next, 0xB0, 0xB8, 0x14, 0x10, 0x44, 0xC8, 0x7F40);
+    g_RenderState.draw.packetCursor = next;
+    DrawMenuCursorArrow(0x14, selectedRow * 32 + 0x38);
+    DrawOptionHintBar(fromLoadMenu ? MENU_OPTION_HINT_MEMORY_CARD_LOAD
+                                   : MENU_OPTION_HINT_MEMORY_CARD_SAVE);
+    DrawPadTypeHint();
+
+    /* The arrow and the hints queue their own packets, so the cursor has to
+     * be read again. Continuing from the stale pointer wrote the tiles over
+     * those packets and linked the ordering table back into itself, which
+     * hung the modern renderer's capture walk on the memory card menu. */
+    next = RENDER_PRIM_CURSOR_AS(u8);
+    base = GamePrimaryOrderingTable(54);
+    next = AddTilePrim(base, next, 0x5D, 0x3C, 0xE4, 0x40, 0, 0, 0);
+    next = AddTilePrim(base, next, 0x5C, 0x3A, 0xE5, 0x44, 0xFF, 0xFF, 0xFF);
+    for (i = 0; i < MEMORY_CARD_SAVE_SLOT_COUNT; i++) {
+        next = DrawShadowedTile(base, next, 0x3E, 0xD0 + i * 0x30);
+    }
+
+    if (showSlotBar != 0) {
+        next = AddTilePrim(base, next, 0x3C, selectedSlot * 0x30 + 0xCC,
+                           0xC8, 0x28, 0x89, 0xFF, 0x76);
+    }
+    next = AddTilePrim(base, next, 0, 0, 0x140, 0xF0, 0x85, 0x15, 0xE);
+    g_RenderState.draw.packetCursor = next;
+}

@@ -1,0 +1,206 @@
+#include "common.h"
+#include "game/menu.h"
+#include "game/race.h"
+#include "game/render_internal.h"
+#include "game/render_state.h"
+
+#include <limits.h>
+#include <stdio.h>
+
+static OptionMenu s_optionMenu;
+#include <string.h>
+
+s32 g_CourseIndex;
+GameFrameContext *g_DrawBuffer;
+s32 g_GameMode;
+s32 g_GrandPrixClass;
+s16 g_GrandPrixMode;
+s16 g_GrandPrixSeries;
+u16 g_PadPressed;
+GameRenderState g_RenderState;
+
+typedef struct LabelRecord {
+    s32 x;
+    s32 y;
+    s32 width;
+    s32 u;
+    s32 v;
+} LabelRecord;
+
+static GameFrameContext s_frame;
+static u8 s_packets[128];
+static LabelRecord s_labels[5];
+static s32 s_labelCount;
+static s32 s_lastCue;
+static GameSceneId s_lastExitScene;
+static s32 s_cursorCalls;
+static s32 s_controllerConfigCalls;
+static ControllerSetup s_controllerSetup;
+
+ControllerSetup *MenuControllerSetup(void) { return &s_controllerSetup; }
+static s32 s_soundMenuStarts;
+static s32 s_trackLoadCalls;
+static s32 s_randomValues[3];
+static s32 s_randomIndex;
+static s32 s_drawMode;
+
+u8 *GameQueueSpriteTrans(GameOrderingTableEntry *ot, u8 *prim, s32 x, s32 y, s32 width,
+                         s32 height, s32 u, s32 v, s32 clut) {
+    (void)ot;
+    (void)height;
+    (void)clut;
+    s_labels[s_labelCount++] = (LabelRecord){x, y, width, u, v};
+    return prim + 1;
+}
+
+u8 *QueueDrawModePrim(GameOrderingTableEntry *ot, u8 *prim, s32 texturePage) {
+    (void)ot;
+    s_drawMode = texturePage;
+    return prim + 1;
+}
+
+void DrawMenuCursorArrow(s32 x, s32 y) {
+    (void)x;
+    (void)y;
+    s_cursorCalls++;
+}
+
+void PlaySoundCue(s32 cue) { s_lastCue = cue; }
+void BeginControllerConfig(ControllerSetup *setup) {
+    (void)setup;
+    s_controllerConfigCalls++;
+}
+void EnterSoundOptionMenu(void) { s_soundMenuStarts++; }
+s32 Random15(void) { return s_randomValues[s_randomIndex++]; }
+s32 RandomIndex(s32 count) {
+    return count > 0 ? (Random15() & 0xFFF) % count : 0;
+}
+s32 RequestCourseTextureAssets(void) {
+    s_trackLoadCalls++;
+    return 0;
+}
+void StartOptionMenuExit(GameSceneId scene) { s_lastExitScene = scene; }
+
+#define CHECK(condition)                                                       \
+    do {                                                                       \
+        if (!(condition)) {                                                    \
+            fprintf(stderr, "check failed at line %d: %s\n", __LINE__,         \
+                    #condition);                                               \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+static void Reset(void) {
+    memset(&s_frame, 0, sizeof(s_frame));
+    g_DrawBuffer = &s_frame;
+    g_RenderState.draw.packetCursor = s_packets;
+    g_GameMode = OPTION_MODE_ROOT;
+    s_optionMenu.cursor = 0;
+    g_PadPressed = 0;
+    s_optionMenu.classRecordCursor = -1;
+    s_optionMenu.classRecordColumn = -1;
+    s_optionMenu.classRecordRow = -1;
+    s_labelCount = 0;
+    s_lastCue = 0;
+    s_lastExitScene = GAME_SCENE_BOOT_LOGO;
+    s_cursorCalls = 0;
+    s_controllerConfigCalls = 0;
+    s_soundMenuStarts = 0;
+    s_trackLoadCalls = 0;
+    s_randomIndex = 0;
+    s_drawMode = -1;
+}
+
+int main(void) {
+    static const LabelRecord expected[5] = {
+        {0x24, 0x94, 0x3C, 0x00, 0x48},
+        {0x24, 0xB4, 0x88, 0x40, 0x48},
+        {0x24, 0xD4, 0x74, 0x00, 0x60},
+        {0x24, 0xF4, 0x5C, 0x74, 0x60},
+        {0x24, 0x114, 0x1C, 0xD0, 0x60},
+    };
+    s32 cursor;
+
+    Reset();
+    DrawOptionRootMenu();
+    CHECK(s_labelCount == 5);
+    CHECK(memcmp(s_labels, expected, sizeof(expected)) == 0);
+    CHECK(s_drawMode == 0x3F && s_cursorCalls == 1);
+
+    Reset();
+    s_optionMenu.cursor = INT_MIN;
+    DrawOptionRootMenu();
+    CHECK(s_optionMenu.cursor == 0 && s_cursorCalls == 1);
+
+    Reset();
+    s_optionMenu.cursor = INT_MAX;
+    DrawOptionRootMenu();
+    CHECK(s_optionMenu.cursor == 4 && s_cursorCalls == 1);
+
+    Reset();
+    s_optionMenu.cursor = 0;
+    g_PadPressed = PAD_UP;
+    UpdateOptionRootMenu();
+    CHECK(s_optionMenu.cursor == 4 && s_lastCue == 1);
+
+    Reset();
+    s_optionMenu.cursor = INT_MAX;
+    g_PadPressed = PAD_DOWN;
+    UpdateOptionRootMenu();
+    CHECK(s_optionMenu.cursor == 0 && s_lastCue == 1);
+
+    for (cursor = 0; cursor < 5; cursor++) {
+        Reset();
+        s_optionMenu.cursor = cursor;
+        g_PadPressed = PAD_CONFIRM;
+        UpdateOptionRootMenu();
+        CHECK(s_lastCue == 2);
+        if (cursor == 0) {
+            CHECK(g_GameMode == OPTION_MODE_CLASS_MENU &&
+                  s_optionMenu.classRecordCursor == 0);
+            CHECK(s_optionMenu.classRecordColumn == 0 && s_optionMenu.classRecordRow == 0);
+        } else if (cursor == 1) {
+            CHECK(g_GameMode == OPTION_MODE_CONTROLLER_CONFIG &&
+                  s_controllerConfigCalls == 1);
+        } else if (cursor == 2) {
+            CHECK(g_GameMode == OPTION_MODE_SOUND_MENU &&
+                  s_soundMenuStarts == 1);
+        } else if (cursor == 3) {
+            CHECK(s_trackLoadCalls == 1 &&
+                  s_lastExitScene == GAME_SCENE_ENTER_BGM_SELECT);
+        } else {
+            CHECK(s_lastExitScene == GAME_SCENE_ENTER_FRONTEND);
+        }
+    }
+
+    Reset();
+    s_optionMenu.cursor = 3;
+    s_randomValues[0] = 0;
+    s_randomValues[1] = 3;
+    s_randomValues[2] = 2;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateOptionRootMenu();
+    CHECK(g_GrandPrixMode == 0 && g_GrandPrixSeries == 0);
+    CHECK(g_GrandPrixClass == 0 && g_CourseIndex == 2);
+    CHECK(s_randomIndex == 3);
+
+    Reset();
+    s_optionMenu.cursor = 3;
+    s_randomValues[0] = 0x1004;
+    s_randomValues[1] = 0x1003;
+    g_PadPressed = PAD_CONFIRM;
+    UpdateOptionRootMenu();
+    CHECK(g_GrandPrixClass == 4 && g_CourseIndex == COURSE_LONG_SLOT);
+    CHECK(s_randomIndex == 2);
+
+    Reset();
+    g_PadPressed = PAD_CANCEL;
+    UpdateOptionRootMenu();
+    CHECK(s_lastCue == 3 &&
+          s_lastExitScene == GAME_SCENE_ENTER_FRONTEND);
+
+    puts("option root menu preserves rendering and all navigation paths");
+    return 0;
+}
+
+OptionMenu *MenuOption(void) { return &s_optionMenu; }

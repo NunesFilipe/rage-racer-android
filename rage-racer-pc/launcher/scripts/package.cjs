@@ -1,0 +1,17 @@
+const path=require('node:path');
+const fs=require('node:fs');
+(async()=>{
+  const root=path.resolve(__dirname,'..');
+  const extension=process.platform==='win32'?'.exe':'';
+  for(const name of ['rage-racer','rage-extract','rage-pack','rage-save-cli','rage-mod-cli','rage-mesh-obj','rage-studio-mcp']){
+    const file=path.join(root,'resources','bin',name+extension);
+    if(!fs.existsSync(file)||!fs.statSync(file).isFile())throw Error(`Missing ${name}. Run npm run build:native before packaging`);
+    fs.accessSync(file,process.platform==='win32'?fs.constants.R_OK:fs.constants.R_OK|fs.constants.X_OK);
+  }
+  fs.accessSync(path.join(root,'resources','rage-port.ini'),fs.constants.R_OK);
+  for(const name of ['cars.toml','cars.ntscj.toml'])fs.accessSync(path.join(root,'resources','bin',name),fs.constants.R_OK);
+  const {packager}=await import('@electron/packager');
+  const result=await packager({dir:root,out:path.join(root,'out'),name:'Rage Racer Editor',executableName:'rage-launcher',appBundleId:'org.rageracer.launcher',extendInfo:{CFBundleDisplayName:'Rage Racer Editor'},overwrite:true,asar:true,prune:true,extraResource:[path.join(root,'resources')],ignore:[/^\/out($|\/)/,/^\/resources($|\/)/,/^\/tests($|\/)/,/^\/native($|\/)/,/^\/scripts($|\/)/,/^\/node_modules($|\/)/,/^\/[^/]+\.md$/,/^\/\.gitignore$/],osxSign:undefined});
+  if(process.platform==='linux')result.push(await require('./package-linux.cjs')(result[0],path.join(root,'out'),require('../package.json').version));
+  console.log(result.join('\n'));
+})().catch(e=>{console.error(e);process.exit(1)});

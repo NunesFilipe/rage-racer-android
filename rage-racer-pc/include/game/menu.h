@@ -1,0 +1,645 @@
+#ifndef GAME_MENU_H
+#define GAME_MENU_H
+
+#include "common.h"
+
+#include "game/menu_types.h"
+#include "game/frontend_internal.h"
+#include "game/input_internal.h"
+#include "game/render_state.h"
+#include "game/scene.h"
+#include "game/state.h"
+#include "game/vector.h"
+#include "psyq/gte.h"
+#include "game/render.h"
+
+/*
+ * Menu / UI state block at 0x8009B200 (~0x550 bytes). Retail addresses it field
+ * by field as absolute globals, never through a base pointer, so the named
+ * externs below - not a struct - are the usable handles.
+ */
+
+enum MenuScreenId {
+    MENU_SCREEN_BOOTSTRAP = 0,
+    MENU_SCREEN_COURSE_SELECT,
+    MENU_SCREEN_RANKING,
+    MENU_SCREEN_ENTER_CAR_SELECT,
+    MENU_SCREEN_CAR_SELECT,
+    MENU_SCREEN_CUSTOMIZE,
+    MENU_SCREEN_DESIGN_MODE,
+    MENU_SCREEN_TEAM_LOGO,
+    MENU_SCREEN_LOGO_SAMPLE,
+    MENU_SCREEN_TEAM_NAME,
+    MENU_SCREEN_PAINT_COLOR,
+    MENU_SCREEN_CAR_SHOP,
+    MENU_SCREEN_ENGINEER_SHOP,
+    MENU_SCREEN_CUSTOM_RACE,
+    MENU_SCREEN_COUNT,
+};
+
+/* Grid-menu cursor (0..0x2B, a 4x11 grid; 0x2A/0x2B are the confirm buttons). */
+extern s32 GameMenuCursor;
+/* Non-zero while a screen transition is in progress; gates re-entry. */
+extern s32 GameMenuBusy;
+/* Cursor animation gate: input is only accepted while this is negative. */
+extern s32 GameMenuCursorAnim;
+typedef struct CourseSelectScreen {
+    s32 option;
+    s32 confirmTimer;
+    s32 modalCursor;
+    const TimedDrawCommand *modalScript;
+    s32 classChangeApplied;
+    s32 curtainSlide;
+    s32 cardSpin;
+    s32 cardSpinTarget;
+    s32 cardPendingGrade;
+    s32 cardFace;
+    s32 swapDelay;
+    s32 displayedCourse;
+    s32 pendingCourse;
+} CourseSelectScreen;
+
+typedef struct BrowseArrows {
+    s32 fade;
+    s32 pulsePhase;
+} BrowseArrows;
+
+typedef struct EngineerShop {
+    const TimedDrawCommand *modalScript;
+    s32 option;
+    s32 confirmTimer;
+    s32 modalCursor;
+} EngineerShop;
+
+typedef struct PaintColor {
+    s32 cursor;
+    s32 selected;
+    s32 pulsePhase;
+} PaintColor;
+
+typedef struct Customize {
+    const TimedDrawCommand *popupScript;
+    s32 option;
+    s32 tirePulsePhase;
+    s32 confirmTimer;
+    s32 modalCursor;
+} Customize;
+
+typedef struct DesignMode {
+    s32 option;
+} DesignMode;
+
+typedef struct LogoSample {
+    const TimedDrawCommand *subPanelScript;
+    s32 cursor;
+    s32 character;
+    s32 background;
+    s32 saved;
+    s32 panelSlide;
+} LogoSample;
+
+typedef struct TeamName {
+    s32 entrySlide;
+    s32 cursorPhase;
+    s32 charModel;
+} TeamName;
+
+typedef struct TeamLogo {
+    const TimedDrawCommand *subPanelScript;
+    s32 option;
+    s32 confirmTimer;
+    s32 modalCursor;
+    s32 colorCycle;
+    s32 fade;
+    s32 zoom;
+    s32 zoomSpan;
+    s32 panelStep;
+    s32 editorStep;
+    s32 cursorX;
+    s32 cursorY;
+    s32 viewX;
+    s32 viewY;
+    s32 guideMode;
+    s32 previousGuideMode;
+    s32 brushSize;
+    s32 penColor;
+    s32 paletteMode;
+    s32 colorChannel;
+    s32 repeatTimer;
+    s32 repeatMask;
+    s32 expertMode;
+    s32 paintArmed;
+    u16 swatches[15];
+    u16 fadedClut[16];
+    Rect fadedClutRect;
+} TeamLogo;
+
+typedef struct CarSpecGraph {
+    s32 step;
+    s32 progress;
+    s32 bars[4];
+} CarSpecGraph;
+
+typedef struct CarSelect {
+    const TimedDrawCommand *popupScript;
+    s32 cursor;
+} CarSelect;
+
+typedef struct CarBrowse {
+    s32 cursor;
+    s32 shopIndex;
+    s32 previous;
+    s32 next;
+    s32 displayedModel;
+    s32 targetModel;
+} CarBrowse;
+
+typedef struct Ranking {
+    s32 cursor;
+} Ranking;
+
+typedef struct OptionMenu {
+    GameSceneId exitScene;
+    s32 cursor;
+    s32 letterboxHeight;
+    s32 classRecordCursor;
+    s32 classRecordColumn;
+    s32 classRecordRow;
+} OptionMenu;
+
+typedef struct MenuWidgets {
+    s32 lightBurst;
+    s32 ownedCarCounter;
+    s32 upperAltPanel;
+    s32 lowerAltPanel;
+    s32 upperAltPanelStep;
+    s32 lowerAltPanelStep;
+    s32 carNameFade;
+    s32 carNameStep;
+    s32 carNameModel;
+    s32 timeAttackProgress;
+    s32 timeAttackStep;
+    s32 hintProgress;
+    s32 hintStep;
+    s32 hintButtonsVisible;
+} MenuWidgets;
+
+typedef struct MenuRuntime {
+    /* State-machine screen updated this frame. */
+    s32 activeScreen;
+    /* Screen fading in, or -1 when no incoming screen is being drawn. */
+    s32 activeDrawScreen;
+    /* Screen fading out, or -1 when no outgoing screen remains. */
+    s32 outgoingDrawScreen;
+    /* Result returned by the outgoing screen's transition renderer. */
+    s32 outgoingProgress;
+    /* Each screen owns a separate state-machine value. */
+    s32 screenState[MENU_SCREEN_COUNT];
+    /* Fade/slide accumulator passed explicitly to each screen renderer. */
+    s32 drawProgress[MENU_SCREEN_COUNT];
+    CourseSelectScreen courseSelect;
+    ControllerSetup controllerSetup;
+    BrowseArrows browseArrows;
+    EngineerShop engineerShop;
+    PaintColor paintColor;
+    Customize customize;
+    DesignMode designMode;
+    LogoSample logoSample;
+    TeamName teamName;
+    TeamLogo teamLogo;
+    CarSpecGraph carSpecGraph;
+    CarSelect carSelect;
+    CarBrowse carBrowse;
+    Ranking ranking;
+    OptionMenu optionMenu;
+    Frontend frontend;
+    MenuWidgets widgets;
+} MenuRuntime;
+
+void MenuRuntimeReset(void);
+const MenuRuntime *MenuRuntimeCurrent(void);
+ControllerSetup *MenuControllerSetup(void);
+CourseSelectScreen *MenuCourseSelect(void);
+BrowseArrows *MenuBrowseArrows(void);
+EngineerShop *MenuEngineerShop(void);
+PaintColor *MenuPaintColor(void);
+Customize *MenuCustomize(void);
+DesignMode *MenuDesignMode(void);
+LogoSample *MenuLogoSample(void);
+TeamName *MenuTeamName(void);
+TeamLogo *MenuTeamLogo(void);
+CarSpecGraph *MenuCarSpecGraph(void);
+CarSelect *MenuCarSelect(void);
+CarBrowse *MenuCarBrowse(void);
+Ranking *MenuRanking(void);
+OptionMenu *MenuOption(void);
+MenuWidgets *MenuWidgetState(void);
+s32 MenuRuntimeScreenState(s32 screen);
+void MenuRuntimeSetScreenState(s32 screen, s32 state);
+
+/* The only entry point for changing the active menu screen. It keeps the
+ * update and fade dispatchers in sync during a completed screen transition. */
+void MenuActivateScreen(s32 screen);
+void MenuActivateEnteringScreen(s32 screen, s32 drawScreen);
+/* Start fading `screen` out. The destination is activated after that screen's
+ * state machine has completed its own exit animation. */
+void MenuBeginExit(s32 screen);
+s32 MenuOutgoingProgress(void);
+
+/*
+ * The two parallel screen tables UpdateMenuMode dispatches through, both indexed
+ * by the same screen id: g_MenuScreenUpdate holds the per-frame state machines
+ * and g_MenuScreenDraw the matching fade/transition overlays. MenuRuntime
+ * selects the active entries. See the screen-table block at the bottom of this
+ * header for the entries.
+ */
+extern void (*g_MenuScreenUpdate[MENU_SCREEN_COUNT])(void);
+extern s32 (*g_MenuScreenDraw[MENU_SCREEN_COUNT])(s32 *progress, s32 step);
+
+/*
+ * Title-menu cursor, indexed by TitleMenuItem. Up/down wraps at
+ * TITLE_MENU_ITEM_COUNT and skips entry 1 while g_ExtraGrandPrixUnlocked is 0. 0 and 1 are the
+ * two Grand Prix save files - they repoint g_CarTable / g_RaceProgress / g_CourseProgress
+ * at that file's tables and set g_GrandPrixMode to 1 - 2 is Time Attack and
+ * 3 is Custom Race. The remaining entries load a save or open the options.
+ * DrawMainMenuRows draws the row whose index equals it as selected.
+ */
+
+/*
+ * Element mask handed to DrawBitPatternOverlay by
+ * UpdateMenuMode, selecting which parts of the current menu overlay are drawn.
+ * -1 while a screen is still opening; screens then set their own pattern.
+ */
+extern s32 g_MenuOverlayPattern;
+
+/* Debug/status phase code written through an asset-load state machine. */
+extern s32 GameMenuLoadPhase;
+
+/* The two RaceRecord[series][course][5] high-score tables kept in the save block:
+ * race ranking (+0x9A4) and time ranking (+0x8DC). */
+extern RaceRecord g_RankingRecords[][4][5];
+extern RaceRecord g_TimeRecords[][4][5];
+
+/* The team-name entry buffer and its length, capped at 6 characters. The pair is
+ * also the first bytes of the memory-card save header row. */
+extern u8 g_TeamNameLength;
+extern u8 g_TeamNameChars[];
+
+/* The two eased current/target pairs of the 3D menu view, in 1/1000 units:
+ * an angle (carousel wraps at 500000 per entry) and a translation. Screens set
+ * only the *Target words. */
+extern s32 g_MenuViewAngle;
+extern s32 g_MenuViewAngleTarget;
+extern s32 g_MenuViewOffset;
+extern s32 g_MenuViewOffsetTarget;
+
+enum MenuLayout {
+    MENU_FADE_MAX = 0x1FC,
+    MENU_FADE_COMPLETE = MENU_FADE_MAX + 1,
+    MENU_FADE_INTENSITY_DIVISOR = 4,
+    MENU_TEAM_NAME_MAX_LENGTH = 6,
+    MENU_TEAM_NAME_GRID_COLUMNS = 11,
+    MENU_TEAM_NAME_GRID_ROWS = 4,
+};
+
+/*
+ * One caption of the setup-screen hint bar. `width` both sizes the sprite and
+ * centres it, and `advance` is how far down the bar the next element starts.
+ * Records are indexed by the DrawOptionHintBar argument.
+ */
+extern OptionHintCaption g_OptionHintCaptions[MENU_OPTION_HINT_COUNT];
+
+/*
+ * Slide geometry shared by the CAR SHOP and ENGINEER SHOP money panels. Both
+ * count 0..25; the panel appears at 11 and rises 35 lines a frame for the next
+ * eleven frames.
+ */
+enum ShopPricePanelLayout {
+    SHOP_PANEL_SLIDE_MAX = 25,
+    SHOP_PANEL_VISIBLE_AT = 11,
+    SHOP_PANEL_RISE_FRAMES = 11,
+    SHOP_PANEL_RISE_PIXELS_PER_FRAME = 35,
+    SHOP_PANEL_MONEY_BOX_Y = 492,
+    SHOP_PANEL_MONEY_TEXT_Y = 502,
+    SHOP_PANEL_PRICE_BOX_Y = 532,
+    SHOP_PANEL_PRICE_TEXT_Y = 542
+};
+
+void DrawCarShopPricePanel(s32 step, s32 money, s32 price);
+void DrawEngineerShopPricePanel(s32 step, s32 money, s32 price);
+
+/* Menu widgets: an outlined filled box, the two-ring selection frame, and the
+ * timeline sprites whose brightness decays after each draw. */
+void GameDrawMenuButton(
+    s32 x,
+    s32 y,
+    s32 width,
+    s32 height,
+    u8 r,
+    u8 g,
+    u8 b);
+void DrawMenuCursorBox(
+    s32 x,
+    s32 y,
+    s32 width,
+    s32 height,
+    s32 useFlash);
+void DrawFadingMenuSprites(
+    s32 progress,
+    s32 lastRow,
+    s32 selectedRow);
+
+/* Menu-mode entry: reloads the live globals from g_RaceProgress, seeds the
+ * render state, zeroes 0x8009B2F8..0x8009B378 and resets all
+ * fourteen per-screen transition accumulators. */
+void InitMenuMode(void);
+void UpdateMenuMode(void);
+
+/*
+ * The menu-mode screen table pair: everything the front end shows once
+ * g_GameMode == 3 is one of fourteen screens, dispatched from UpdateMenuMode
+ * through the active MenuRuntime screen and its fade overlay. MenuRuntime owns
+ * one draw accumulator per screen; positive steps fade in and negative steps
+ * fade out.
+ */
+
+/* id 1 -- course + class picker; left/right change course, up/down the rows. */
+void EnterCourseSelectScreen(void);
+/* Whether the course before or after the current one may be picked; both
+ * depend on the class and on whether a series is selected. In course_select.c,
+ * next to the course list they read. */
+s32 CanSelectPrevCourse(void);
+s32 CanSelectNextCourse(void);
+s32 SelectableCourseStep(s32 course, s32 step);
+void UpdateCourseSelectScreen(void);
+s32 DrawCourseSelectScreen(s32 *progress, s32 step);
+
+/* id 2 -- "RANKING": total time / lap time tables, or exit back to id 1. */
+void UpdateRankingScreen(void);
+typedef enum RankingTableKind {
+    RANKING_TABLE_TOTAL,
+    RANKING_TABLE_LAP,
+} RankingTableKind;
+/* The five record rows: total race times come from g_TimeRecords; fastest-lap
+ * times come from the legacy-named g_RankingRecords. */
+s32 DrawRankingTable(s32 *accumulator, s32 step, RankingTableKind table);
+
+/* id 3 -- runs for a single frame on the way from id 1 into id 4. */
+void EnterCarSelectScreen(void);
+
+/* id 4 -- "CAR SELECT"; the hub that starts a race or opens the shops. */
+/* The yes/no prompt both shops put up before taking the player's money. */
+void DrawShopPromptButtons(GameOrderingTableEntry *ot, s32 cursor, s32 flash);
+
+/* Rescans the owned-car list either side of the current one, and rechecks
+ * what the shop and the engineer will accept. Both live in car_select.c. */
+void UpdateOwnedCarNeighbours(CarBrowse *browse);
+void RefreshCarUnlockState(CarBrowse *browse);
+void UpdateCarSelectScreen(void);
+s32 DrawCarSelectScreen(s32 *progress, s32 step);
+
+/* id 5 -- "CUSTOMIZE": tire compound (5 settings) and transmission (AT/MT). */
+void UpdateCustomizeScreen(void);
+
+/* id 6 -- "DESIGN MODE": livery hub, branches to team logo / name / colour. */
+void UpdateDesignModeScreen(void);
+s32 DrawDesignModeScreen(s32 *progress, s32 step);
+
+/* id 7 -- "TEAM LOGO": pick a sample logo (id 8) or hand-paint one. */
+void UpdateTeamLogoScreen(void);
+
+/* id 8 -- "TEAM LOGO" sample picker: character and background, 20 each. */
+void UpdateLogoSampleScreen(void);
+
+/*
+ * id 9 -- "TEAM NAME": the 4x11 character grid driven by GameMenuCursor, with
+ * cell 0x2A = BS and 0x2B = ED. Accepted characters accumulate in
+ * g_TeamNameChars[g_TeamNameLength].
+ */
+void UpdateTeamNameScreen(void);
+
+/* id 10 -- "PAINT COLOR": body colour 1 and 2, 18 choices each. */
+void UpdatePaintColorScreen(void);
+
+/* id 11 -- "SHOP" (car shop): browse every car and buy the selected one. */
+void UpdateCarShopScreen(void);
+
+/* id 12 -- "SHOP" (engineer shop): pay the tune-up fee to grade the car up. */
+void UpdateEngineerShopScreen(void);
+void ResetEngineerShopScreen(void);
+
+/*
+ * Menu widgets shared across those screens. Each keeps its own accumulator and
+ * follows the same `step` convention as the Draw handlers above: 0 resets and
+ * draws nothing, positive ramps in, negative ramps out.
+ */
+/* The four-bar car performance chart; only visible on CUSTOMIZE. */
+void DrawCarSpecGraph(CarSpecGraph *graph, u32 tireGrade);
+/* "MAX POWER <n> ps / <n> rpm" and "MAX TORQUE <n>.<n> kgm / <n> rpm". */
+void DrawCarEngineSpec(s32 slideRaw, s32 brightness);
+/* The TEAM NAME 4x11 grid, its highlight and caret, and the typed name. */
+void DrawTeamNameEntry(TeamName *teamName, s32 step, s32 cursorIndex);
+/* The 3D car view behind screens 3, 4, 5, 6, 10, 11, 12: eases
+ * g_MenuViewAngle/Offset, then submits the car and the showroom floor. */
+void DrawMenuCarView(void);
+void ResetMenuCar(void);
+void StartMenuCarRotation(void);
+s32 MenuCarRotationSpeed(void);
+void ResetMenuButtonAnimation(void);
+/* Draw and input halves of the logo painter. The canvas D_801E6F2C is a 64x64
+ * 4bpp bitmap with its own 16-entry CLUT at g_TeamLogoClut. */
+extern u16 g_TeamLogoClut[16];
+extern TeamLogoCanvas g_TeamLogoCanvas;
+void DrawTeamLogoCanvas(TeamLogo *logo, s32 panelStep, s32 editorStep);
+void UpdateTeamLogoCanvas(TeamLogo *logo);
+
+/*
+ * The eight whole-canvas transforms UpdateTeamLogoCanvas offers, each
+ * operating in place on g_TeamLogoCanvas (64 rows x 8 words x 8 nibbles).
+ * The four scrolls wrap and play cue 1; the flips and rotations play cue 8.
+ * Directions are derived from the arithmetic.
+ */
+void ScrollTeamLogoUp(void);
+void ScrollTeamLogoDown(void);
+void ScrollTeamLogoLeft(void);
+void ScrollTeamLogoRight(void);
+/* Mirror about the horizontal axis: row r <-> row 63 - r. */
+void FlipTeamLogoVertical(void);
+/* Mirror about the vertical axis: nibbles reversed inside each word and word
+ * w swapped with word 7 - w. */
+void FlipTeamLogoHorizontal(void);
+
+/* dst(y, x) = src(x, 63 - y). */
+void RotateTeamLogoCcw(void);
+/* dst(y, x) = src(63 - x, y). */
+void RotateTeamLogoCw(void);
+
+/*
+ * TEAM LOGO editor data, all per-file types.
+ *   g_TeamLogoCanvas   D_801E6F2C  2048 bytes = 64x64 4bpp
+ *   g_TeamLogoClut     g_TeamLogoClut  16 x u16
+ *   g_TeamLogoRect     g_TeamLogoRect  RECT{0x290,0x30,64,16} for the canvas
+ *   g_TeamLogoClutRect g_TeamLogoClutRect  RECT{16,480,16,1} for the CLUT
+ * g_ClassRecords g_ClassRecords is the 11 x {s16 grade, s16 clears} table.
+ */
+
+extern s32 g_BgmTrackCount;
+extern s32 g_CarSwapFromIndex;
+extern s32 g_CarSwapToIndex;
+typedef enum FrontendState {
+    FRONTEND_STATE_INVALID = -1,
+    FRONTEND_STATE_TITLE,
+    FRONTEND_STATE_MENU_OPENING,
+    FRONTEND_STATE_MENU_INPUT,
+    FRONTEND_STATE_MENU_EXIT,
+    FRONTEND_STATE_COUNT
+} FrontendState;
+
+extern s16 g_NegconMaxTwistSaved;
+extern s16 g_NegconSteerPlaySaved;
+extern s32 g_PlayerMoney;
+extern TimedDrawCommand g_UiChromeScript[];
+extern TimedDrawCommand g_UiChromeScript2[];
+
+void ClearTeamNameTexture(void);
+void DrawCarNamePlate(MenuWidgets *widgets);
+void DrawMenuAltPanel(MenuWidgets *widgets);
+void DrawMenuCourseView(CourseSelectScreen *screen);
+void DrawOptionRootMenu(void);
+void UpdateOptionRootMenu(void);
+void UpdateClassRecordMenu(void);
+void UpdateClassRecordBrowse(void);
+void DrawPadTypeHint(void);
+void UpdateSoundOptionMenu(void);
+void UpdateSoundSettingAdjust(void);
+void DrawTimeAttackPlate(MenuWidgets *widgets);
+/* Validate and activate one double-buffered showroom model for both CPU-side
+ * model access and rendering. */
+s32 ActivateShowroomCarModel(s32 slot);
+
+extern u8 g_TeamNameFontGlyphs
+    [TEAM_NAME_FONT_GLYPH_COUNT * TEAM_NAME_FONT_GLYPH_BYTES];
+extern u8 g_TeamNameBlankTile[192];
+extern TimedDrawCommand g_CourseSelectGpScript[];
+extern TimedDrawCommand g_CourseSelectTimeAttackScript[];
+extern TimedDrawCommand g_CarSelectMenuScriptGp[];
+extern TimedDrawCommand g_CarSelectMenuScriptTimeAttack[];
+extern TimedDrawCommand g_UiEmptyScript[];
+enum {
+    CAR_PRICE_COUNT = 32,
+    CAR_TUNE_UP_PRICE_COUNT = 31,
+};
+extern s32 g_CarTuneUpPriceTable[CAR_TUNE_UP_PRICE_COUNT];
+extern s32 g_RankingPendingState;
+extern char *g_BgmTrackNames[];
+extern s32 g_CarPriceTable[CAR_PRICE_COUNT];
+extern TimedDrawCommand g_MenuHintBarScript[];
+
+/* Retail stores timed-draw commands as packed 12-byte records containing
+ * 32-bit PSX addresses. Native pointers widen those records, so the host must
+ * use decoded TimedDrawCommand arrays instead of walking the serialized data
+ * in host_state.c directly. */
+#define RAGE_NATIVE_UI_SCRIPT(name, count) \
+    extern TimedDrawCommand g_Native##name[count]
+RAGE_NATIVE_UI_SCRIPT(RankingPanelScript, 5);
+RAGE_NATIVE_UI_SCRIPT(CustomizeMenuScriptGp, 13);
+RAGE_NATIVE_UI_SCRIPT(CustomizeMenuScriptTimeAttack, 11);
+RAGE_NATIVE_UI_SCRIPT(DesignModeScript, 16);
+RAGE_NATIVE_UI_SCRIPT(TeamLogoScreenScript, 12);
+RAGE_NATIVE_UI_SCRIPT(LogoSampleScreenScript, 12);
+RAGE_NATIVE_UI_SCRIPT(TeamNameScreenScript, 61);
+RAGE_NATIVE_UI_SCRIPT(PaintColorScreenScript, 15);
+RAGE_NATIVE_UI_SCRIPT(CarShopScreenScript, 9);
+RAGE_NATIVE_UI_SCRIPT(EngineerShopScreenScript, 68);
+RAGE_NATIVE_UI_SCRIPT(MenuDialogPanelUpperScript, 4);
+RAGE_NATIVE_UI_SCRIPT(MenuDialogPanelLowerScript, 8);
+RAGE_NATIVE_UI_SCRIPT(CourseSelectSavePromptScript, 4);
+RAGE_NATIVE_UI_SCRIPT(CourseSelectSavePromptBanner, 2);
+RAGE_NATIVE_UI_SCRIPT(MenuRow0MarkerScript, 4);
+RAGE_NATIVE_UI_SCRIPT(MenuRow1MarkerScript, 16);
+RAGE_NATIVE_UI_SCRIPT(RankingMenuScript, 9);
+RAGE_NATIVE_UI_SCRIPT(TransmissionUnavailableScript, 4);
+RAGE_NATIVE_UI_SCRIPT(TeamLogoScreenScript2, 2);
+RAGE_NATIVE_UI_SCRIPT(CarShopUnavailableScript, 2);
+RAGE_NATIVE_UI_SCRIPT(EngineerShopUnavailableScript, 3);
+RAGE_NATIVE_UI_SCRIPT(EngineerShopNoFundsScript, 2);
+RAGE_NATIVE_UI_SCRIPT(CarShopNoFundsScript, 5);
+RAGE_NATIVE_UI_SCRIPT(DesignModeDeniedScript, 2);
+RAGE_NATIVE_UI_SCRIPT(EngineerShopTuneUpPromptScript, 5);
+#undef RAGE_NATIVE_UI_SCRIPT
+
+#define g_RankingPanelScript g_NativeRankingPanelScript
+#define g_CustomizeMenuScriptGp g_NativeCustomizeMenuScriptGp
+#define g_CustomizeMenuScriptTimeAttack g_NativeCustomizeMenuScriptTimeAttack
+#define g_DesignModeScript g_NativeDesignModeScript
+#define g_TeamLogoScreenScript g_NativeTeamLogoScreenScript
+#define g_LogoSampleScreenScript g_NativeLogoSampleScreenScript
+#define g_TeamNameScreenScript g_NativeTeamNameScreenScript
+#define g_PaintColorScreenScript g_NativePaintColorScreenScript
+#define g_CarShopScreenScript g_NativeCarShopScreenScript
+#define g_EngineerShopScreenScript g_NativeEngineerShopScreenScript
+#define g_MenuDialogPanelUpperScript g_NativeMenuDialogPanelUpperScript
+#define g_MenuDialogPanelLowerScript g_NativeMenuDialogPanelLowerScript
+#define g_CourseSelectSavePromptScript g_NativeCourseSelectSavePromptScript
+#define g_CourseSelectSavePromptBanner g_NativeCourseSelectSavePromptBanner
+#define g_MenuRow0MarkerScript g_NativeMenuRow0MarkerScript
+#define g_MenuRow1MarkerScript g_NativeMenuRow1MarkerScript
+#define g_RankingMenuScript g_NativeRankingMenuScript
+#define g_TransmissionUnavailableScript g_NativeTransmissionUnavailableScript
+#define g_TeamLogoScreenScript2 g_NativeTeamLogoScreenScript2
+#define g_CarShopUnavailableScript g_NativeCarShopUnavailableScript
+#define g_EngineerShopUnavailableScript g_NativeEngineerShopUnavailableScript
+#define g_EngineerShopNoFundsScript g_NativeEngineerShopNoFundsScript
+#define g_CarShopNoFundsScript g_NativeCarShopNoFundsScript
+#define g_DesignModeDeniedScript g_NativeDesignModeDeniedScript
+#define g_EngineerShopTuneUpPromptScript g_NativeEngineerShopTuneUpPromptScript
+extern s16 g_NegconNeutralIISaved;
+extern s16 g_NegconNeutralISaved;
+extern s16 g_NegconNeutralLSaved;
+extern s16 g_NegconSteerNeutralSaved;
+
+void AdvanceGrandPrixClass(void);
+s32 CountOwnedCars(void);
+void ComposeSampleTeamLogo(TeamLogo *logo, s32 character, s32 background);
+void DrawBrowseArrows(BrowseArrows *arrows, s32 step, s32 courseLayout,
+                      s32 drawLeft, s32 drawRight);
+void DrawLogoSamplePanel(LogoSample *samplePanel, const TeamLogo *logo,
+                         s32 step, s32 sample);
+void DrawMenuCursorArrow(s32 x, s32 y);
+void DrawMenuLightBurst(MenuWidgets *widgets, s32 arg);
+void DrawOptionHintBar(s32 variant);
+void RestoreNegconCalibrationSettings(void);
+void DrawOwnedCarCounter(MenuWidgets *widgets, s32 direction, s32 ownedCount);
+void DrawCarCounter(MenuWidgets *widgets, s32 direction, s32 current,
+                    s32 total);
+void DrawSpriteString(s32 x, s32 y, const char *str, s32 clutIndex);
+void RampTeamLogoCanvas(TeamLogo *logo, s32 from, s32 to);
+void ShuffleBgmOrder(void);
+void StartOptionMenuExit(GameSceneId scene);
+void UploadTeamNameTexture(const u8 *str, s32 len);
+s32 DrawClassChangeCurtain(CourseSelectScreen *screen, s32 step);
+void UpdateOptionScene(void);
+void UpdateOptionMenuFade(void);
+s32 DrawPaintColorPalette(PaintColor *paint, s32 *counter, s32 step);
+void DrawTeamNameCharModel(TeamName *teamName);
+void DrawTireCompoundSlider(Customize *customize, u8 compound,
+                            s32 confirming);
+void DrawVolumeBar(s32 level, s32 y);
+void UpdateAndDrawCourseCard(CourseSelectScreen *screen);
+void UpdateCarListCursor(CarBrowse *browse);
+void UpdateFrontend(void);
+void UpdateTitleAttract(void);
+
+extern SVec g_CourseCardVerts[];
+extern Vec4 g_MenuCarPivotOffset;
+extern const Vec4 g_TeamNameCharScale;
+extern DVec g_ClassRecordCellPoints[];
+extern Rgb g_ClassRecordNameSprites[];
+extern Matrix g_MenuColorMatrix;
+extern Matrix g_MenuLightMatrix;
+extern Vec4 g_MenuViewScale;
+
+void DrawPrizeMoneyPanel(s32 y, s32 prize, s32 bonus);
+extern void (*g_FrontendDrawHandlers[FRONTEND_STATE_COUNT])(void);
+
+#endif

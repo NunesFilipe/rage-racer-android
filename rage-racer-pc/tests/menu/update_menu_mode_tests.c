@@ -1,0 +1,257 @@
+#include "game/car.h"
+#include "game/menu.h"
+#include "game/render_internal.h"
+
+#include <limits.h>
+#include <stdio.h>
+#include <string.h>
+
+s32 g_AnimTimer;
+CarEntry *g_CarTable;
+GameRenderState g_RenderState;
+s32 g_MenuHandlerIndex;
+TimedDrawCommand g_MenuHintBarScript[1];
+TimedDrawCommand g_UiEmptyScript[1];
+s32 g_MenuOutgoingHandlerIndex;
+s32 g_MenuOverlayPattern;
+s32 g_MenuScreen;
+u8 g_PadType;
+s32 g_PlayerCarIndex;
+s32 g_SceneTimer;
+
+static CarEntry s_cars[3];
+static GameOrderingTableEntry s_orderingTable[4];
+static s32 s_displayMask;
+static s32 s_drawCalls;
+static s32 s_drawSteps[2];
+static s32 s_hintResult;
+static s32 s_overlayCalls;
+static s32 s_solidRectCalls;
+static s32 s_specCarTire;
+static s32 s_spriteCount;
+static u16 s_spriteTextureV;
+static s32 s_updateCalls;
+
+static void CountUpdate(void) { s_updateCalls++; }
+static s32 CountDraw(s32 *progress, s32 step) {
+    *progress += step;
+    s_drawSteps[s_drawCalls++] = step;
+    return 123;
+}
+
+void (*g_MenuScreenUpdate[MENU_SCREEN_COUNT])(void);
+s32 (*g_MenuScreenDraw[MENU_SCREEN_COUNT])(s32 *progress, s32 step);
+
+void SetDispMask(s32 enabled) { s_displayMask = enabled; }
+
+void DrawSolidRect(GameOrderingTableEntry *ot, s32 x, s32 y, s32 width,
+                   s32 height, s32 r, s32 g, s32 b, s32 depth) {
+    (void)ot;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    (void)r;
+    (void)g;
+    (void)b;
+    (void)depth;
+    s_solidRectCalls++;
+}
+
+void DrawCarSpecGraph(CarSpecGraph *graph, u32 tireGrade) {
+    s_specCarTire = (s32)tireGrade;
+    (void)graph;
+}
+
+s32 RunTimedDrawScript(const TimedDrawCommand *commands, s32 *progress,
+                       s32 step) {
+    (void)commands;
+    *progress += step;
+    return s_hintResult;
+}
+
+void DrawSprite(GameOrderingTableEntry *ot, s16 x0, s16 y0, s16 x1, u16 y1,
+                u16 u0, u16 v0, u8 r, u8 g, u8 b, u16 clutX,
+                s32 shadeTex, s32 semiTrans, u32 flags) {
+    (void)ot;
+    (void)x0;
+    (void)y0;
+    (void)x1;
+    (void)y1;
+    (void)u0;
+    if (s_spriteCount == 0) {
+        s_spriteTextureV = v0;
+    }
+    (void)r;
+    (void)g;
+    (void)b;
+    (void)clutX;
+    (void)shadeTex;
+    (void)semiTrans;
+    (void)flags;
+    s_spriteCount++;
+}
+
+void DrawBitPatternOverlay(s32 pattern) {
+    (void)pattern;
+    s_overlayCalls++;
+}
+
+#define CHECK(condition)                                                       \
+    do {                                                                       \
+        if (!(condition)) {                                                    \
+            fprintf(stderr, "%s:%d: check failed: %s\n", __FILE__, __LINE__, \
+                    #condition);                                               \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+static void Reset(void) {
+    s32 i;
+
+    memset(&g_RenderState, 0, sizeof(g_RenderState));
+    memset(s_cars, 0, sizeof(s_cars));
+    for (i = 0; i < MENU_SCREEN_COUNT; i++) {
+        g_MenuScreenUpdate[i] = CountUpdate;
+        g_MenuScreenDraw[i] = CountDraw;
+    }
+    g_CarTable = s_cars;
+    RENDER_OT_BASE = s_orderingTable;
+    g_AnimTimer = 10;
+    g_SceneTimer = 0;
+    MenuRuntimeReset();
+    MenuActivateScreen(MENU_SCREEN_COURSE_SELECT);
+    MenuCarSpecGraph()->step = 7;
+    g_PlayerCarIndex = 1;
+    MenuCarBrowse()->cursor = 2;
+    s_cars[1].tireCompound = 4;
+    s_cars[2].tireCompound = 8;
+    MenuWidgetState()->hintStep = 0;
+    MenuWidgetState()->hintProgress = 0;
+    MenuWidgetState()->hintButtonsVisible = 0;
+    g_MenuOverlayPattern = 0;
+    g_PadType = PAD_TYPE_DIGITAL;
+    s_displayMask = 0;
+    s_drawCalls = 0;
+    s_hintResult = 0;
+    s_overlayCalls = 0;
+    s_solidRectCalls = 0;
+    s_specCarTire = -1;
+    s_spriteCount = 0;
+    s_spriteTextureV = 0;
+    s_updateCalls = 0;
+}
+
+static int TestDispatchAndLayers(void) {
+    Reset();
+    g_SceneTimer = 1;
+    MenuActivateScreen(MENU_SCREEN_RANKING);
+    MenuBeginExit(MENU_SCREEN_CUSTOMIZE);
+    UpdateMenuMode();
+    CHECK(g_AnimTimer == 11 && g_SceneTimer == 2 && s_displayMask == 1);
+    CHECK(g_RenderState.pass.otShift == 1 && s_updateCalls == 1);
+    CHECK(s_solidRectCalls == 1);
+    CHECK(s_drawCalls == 1 && s_drawSteps[0] == -10);
+    CHECK(MenuRuntimeCurrent()->drawProgress[MENU_SCREEN_CUSTOMIZE] == -10);
+    CHECK(MenuRuntimeCurrent()->outgoingProgress == 123);
+    CHECK(s_specCarTire == 4 && s_overlayCalls == 0);
+
+    Reset();
+    MenuActivateScreen(MENU_SCREEN_CAR_SHOP);
+    MenuWidgetState()->hintStep = 1;
+    MenuWidgetState()->hintButtonsVisible = 1;
+    s_hintResult = 1;
+    UpdateMenuMode();
+    CHECK(g_RenderState.pass.otShift == 5 && s_specCarTire == 8);
+    CHECK(MenuWidgetState()->hintProgress == 1 && s_overlayCalls == 1);
+    CHECK(s_spriteCount == 2 && s_spriteTextureV == 0xE8);
+
+    Reset();
+    MenuWidgetState()->hintStep = 1;
+    MenuWidgetState()->hintButtonsVisible = 1;
+    g_PadType = PAD_TYPE_NEGCON;
+    s_hintResult = 1;
+    UpdateMenuMode();
+    CHECK(s_spriteCount == 2 && s_spriteTextureV == 0xF4);
+    return 0;
+}
+
+static int TestInvalidIndices(void) {
+    Reset();
+    MenuActivateEnteringScreen(MENU_SCREEN_CAR_SHOP, MENU_SCREEN_COUNT);
+    UpdateMenuMode();
+    CHECK(MenuRuntimeCurrent()->activeScreen == MENU_SCREEN_COURSE_SELECT);
+    CHECK(s_updateCalls == 1 && s_drawCalls == 1 && s_drawSteps[0] == 0x14);
+    CHECK(MenuRuntimeCurrent()->drawProgress[MENU_SCREEN_COURSE_SELECT] ==
+          0x14);
+    CHECK(g_RenderState.pass.otShift == 1);
+
+    Reset();
+    g_PlayerCarIndex = -1;
+    UpdateMenuMode();
+    CHECK(s_specCarTire == 0);
+
+    Reset();
+    MenuActivateScreen(MENU_SCREEN_CAR_SHOP);
+    MenuCarBrowse()->cursor = GAME_CAR_COUNT;
+    UpdateMenuMode();
+    CHECK(s_specCarTire == 0);
+
+    Reset();
+    g_CarTable = NULL;
+    UpdateMenuMode();
+    CHECK(s_specCarTire == 0);
+
+    Reset();
+    RENDER_OT_BASE = NULL;
+    MenuWidgetState()->hintStep = 1;
+    MenuWidgetState()->hintButtonsVisible = 1;
+    s_hintResult = 1;
+    UpdateMenuMode();
+    CHECK(s_solidRectCalls == 0 && s_spriteCount == 0);
+    CHECK(s_updateCalls == 1 && s_overlayCalls == 1);
+    return 0;
+}
+
+static int TestTimerWrap(void) {
+    Reset();
+    g_AnimTimer = INT_MAX;
+    g_SceneTimer = INT_MAX;
+    UpdateMenuMode();
+    CHECK(g_AnimTimer == INT_MIN && g_SceneTimer == INT_MIN);
+    CHECK(s_displayMask == 0);
+    return 0;
+}
+
+static int TestScreenStateIsolation(void) {
+    MenuRuntimeReset();
+    MenuRuntimeSetScreenState(MENU_SCREEN_CAR_SELECT, 5);
+    MenuRuntimeSetScreenState(MENU_SCREEN_COURSE_SELECT, -2);
+    MenuWidgetState()->lightBurst = 12;
+    CHECK(MenuRuntimeScreenState(MENU_SCREEN_CAR_SELECT) == 5);
+    CHECK(MenuRuntimeScreenState(MENU_SCREEN_COURSE_SELECT) == -2);
+
+    MenuRuntimeReset();
+    CHECK(MenuWidgetState()->lightBurst == 0);
+    CHECK(MenuRuntimeScreenState(MENU_SCREEN_CAR_SELECT) == 0);
+    CHECK(MenuRuntimeScreenState(MENU_SCREEN_COURSE_SELECT) == 0);
+    CHECK(MenuRuntimeCurrent()->drawProgress[MENU_SCREEN_CAR_SELECT] == 0);
+    CHECK(MenuRuntimeCurrent()->drawProgress[MENU_SCREEN_COURSE_SELECT] == 0);
+    /* A reset leaves every panel script runnable, never NULL. */
+    CHECK(MenuCourseSelect()->modalScript == g_UiEmptyScript);
+    CHECK(MenuEngineerShop()->modalScript == g_UiEmptyScript);
+    CHECK(MenuCustomize()->popupScript == g_UiEmptyScript);
+    CHECK(MenuLogoSample()->subPanelScript == g_UiEmptyScript);
+    CHECK(MenuTeamLogo()->subPanelScript == g_UiEmptyScript);
+    CHECK(MenuCarSelect()->popupScript == g_UiEmptyScript);
+    return 0;
+}
+
+int main(void) {
+    CHECK(TestDispatchAndLayers() == 0);
+    CHECK(TestInvalidIndices() == 0);
+    CHECK(TestTimerWrap() == 0);
+    CHECK(TestScreenStateIsolation() == 0);
+    puts("menu mode dispatcher tests passed");
+    return 0;
+}

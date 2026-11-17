@@ -1,0 +1,958 @@
+#include <math.h>
+#include <float.h>
+#include <fenv.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "render/render_world.h"
+#include "render/render_world_frame.h"
+#include "render/render_projection.h"
+#include "render/render_shadow.h"
+
+static int failures;
+
+#define EXPECT_EQ(expected, actual) do {                                      \
+    unsigned long long expected_value = (unsigned long long)(expected);       \
+    unsigned long long actual_value = (unsigned long long)(actual);           \
+    if (expected_value != actual_value) {                                     \
+        fprintf(stderr, "%s:%d: expected %llu, got %llu\\n", __FILE__,      \
+                __LINE__, expected_value, actual_value);                      \
+        failures++;                                                            \
+    }                                                                          \
+} while (0)
+
+static void test_frame_reset_preserves_storage_and_resets_overflow(void) {
+    RenderMeshInstance storage[1];
+    RenderWorld world;
+    RenderMeshInstance instance = {0};
+
+    RenderWorldInit(&world, storage, 1);
+    RenderWorldBeginFrame(&world, 41);
+    instance.entity = 7;
+    instance.mesh = 12;
+    instance.assetSet = RAGE_RENDER_ASSET_COURSE;
+    instance.assetKey = 0x101;
+    instance.material = 3;
+    instance.pass = RAGE_RENDER_PASS_MIRROR;
+    instance.transform.position.x = 22.0f;
+    instance.previousTransform.position.x = 20.0f;
+    EXPECT_EQ(1, RenderWorldSubmitMesh(&world, &instance));
+    EXPECT_EQ(0, RenderWorldSubmitMesh(&world, &instance));
+    EXPECT_EQ(1, world.instanceCount);
+    EXPECT_EQ(1, world.overflowCount);
+    EXPECT_EQ(7, storage[0].entity);
+    EXPECT_EQ(RAGE_RENDER_ASSET_COURSE, storage[0].assetSet);
+    EXPECT_EQ(0x101, storage[0].assetKey);
+    EXPECT_EQ(RAGE_RENDER_PASS_MIRROR, storage[0].pass);
+
+    RenderWorldBeginFrame(&world, 42);
+    EXPECT_EQ(42, world.frame);
+    EXPECT_EQ(0, world.instanceCount);
+    EXPECT_EQ(0, world.overflowCount);
+    EXPECT_EQ(1, RenderWorldSubmitMesh(&world, &instance));
+    EXPECT_EQ(20, (int)storage[0].previousTransform.position.x);
+}
+
+static void test_mesh_submission_rejects_invalid_storage(void) {
+    RenderMeshInstance storage[1] = {0};
+    RenderMeshInstance instance = {0};
+    RenderWorld world;
+
+    RenderWorldInit(&world, NULL, 1);
+    EXPECT_EQ(0, RenderWorldSubmitMesh(&world, &instance));
+    EXPECT_EQ(1, world.overflowCount);
+
+    RenderWorldInit(&world, storage, 1);
+    world.instanceCount = 2;
+    EXPECT_EQ(0, RenderWorldSubmitMesh(&world, &instance));
+    EXPECT_EQ(1, world.overflowCount);
+    EXPECT_EQ(0, RenderWorldSubmitMesh(NULL, &instance));
+    EXPECT_EQ(0, RenderWorldSubmitMesh(&world, NULL));
+}
+
+static void test_public_world_mutators_reject_null_inputs(void) {
+    RenderWorld world;
+    RenderCamera camera = {0};
+
+    RenderWorldInit(NULL, NULL, 0);
+    RenderWorldInit(&world, NULL, 0);
+    RenderWorldBeginFrame(NULL, 1);
+    RenderWorldSetCamera(NULL, &camera);
+    RenderWorldSetCamera(&world, NULL);
+    RenderWorldSetMirrorCamera(NULL, &camera, 1, 0.0f);
+    RenderWorldSetMirrorCamera(&world, NULL, 1, 0.0f);
+    RenderTerrainCellTransform(0, 0, NULL);
+    RenderConvertPsxMatrix(NULL, NULL);
+    EXPECT_EQ(0, world.hasCamera);
+    EXPECT_EQ(0, world.hasMirrorCamera);
+}
+
+static void test_legacy_mirror_instances_can_be_removed_from_scene(void) {
+    RenderMeshInstance storage[3] = {0};
+    RenderWorld world;
+
+    RenderWorldInit(&world, storage, 3);
+    storage[0].entity = 10;
+    storage[0].pass = RAGE_RENDER_PASS_MAIN;
+    storage[1].entity = 20;
+    storage[1].pass = RAGE_RENDER_PASS_MIRROR;
+    storage[2].entity = 30;
+    storage[2].pass = RAGE_RENDER_PASS_MAIN;
+    world.instanceCount = 3;
+    RenderWorldDiscardPass(&world, RAGE_RENDER_PASS_MIRROR);
+    EXPECT_EQ(2, world.instanceCount);
+    EXPECT_EQ(10, storage[0].entity);
+    EXPECT_EQ(30, storage[1].entity);
+}
+
+static void test_camera_is_scene_data_not_backend_state(void) {
+    RenderMeshInstance storage[2];
+    RenderWorld world;
+    RenderCamera camera = {0};
+
+    RenderWorldInit(&world, storage, 2);
+    camera.transform.position.y = 3.5f;
+    camera.verticalFovDegrees = 70.0f;
+    camera.nearPlane = 0.1f;
+    camera.farPlane = 5000.0f;
+    camera.fogColor.x = 0.25f;
+    camera.skyTopColor.x = 0.10f;
+    camera.skyColor.x = 0.20f;
+    camera.skyHorizonColor.x = 0.30f;
+    camera.skyBottomColor.x = 0.40f;
+    camera.skyAssetKey = 88;
+    camera.skyCloudRow = 2;
+    camera.skyGridOrigin = (Vec3){-96.0f, 112.0f, -96.0f};
+    camera.skyGridColumn = (Vec3){64.0f, 0.0f, 4.0f};
+    camera.skyGridRow = (Vec3){0.0f, 128.0f, 107.0f};
+    camera.fogNear = 100.0f;
+    camera.fogFar = 500.0f;
+    RenderWorldSetCamera(&world, &camera);
+    EXPECT_EQ(35, (int)(world.camera.transform.position.y * 10.0f));
+    EXPECT_EQ(70, (int)world.camera.verticalFovDegrees);
+    EXPECT_EQ(5000, (int)world.camera.farPlane);
+    EXPECT_EQ(25, (int)(world.camera.fogColor.x * 100.0f));
+    EXPECT_EQ(10, (int)(world.camera.skyTopColor.x * 100.0f));
+    EXPECT_EQ(20, (int)(world.camera.skyColor.x * 100.0f));
+    EXPECT_EQ(30, (int)(world.camera.skyHorizonColor.x * 100.0f));
+    EXPECT_EQ(40, (int)(world.camera.skyBottomColor.x * 100.0f));
+    EXPECT_EQ(88, world.camera.skyAssetKey);
+    EXPECT_EQ(500, (int)world.camera.fogFar);
+
+    RenderWorldBeginFrame(&world, 2);
+    camera.transform.position.y = 13.5f;
+    camera.verticalFovDegrees = 80.0f;
+    camera.fogColor.x = 0.75f;
+    camera.skyTopColor.x = 0.70f;
+    camera.skyColor.x = 0.80f;
+    camera.skyHorizonColor.x = 0.90f;
+    camera.skyBottomColor.x = 1.00f;
+    camera.skyAssetKey = 90;
+    camera.skyCloudRow = 4;
+    camera.skyGridOrigin = (Vec3){-32.0f, 96.0f, -32.0f};
+    camera.skyGridColumn = (Vec3){64.0f, 0.0f, 5.0f};
+    camera.skyGridRow = (Vec3){0.0f, 128.0f, 91.0f};
+    camera.fogNear = 200.0f;
+    camera.fogFar = 1000.0f;
+    RenderWorldSetCamera(&world, &camera);
+    RenderInterpolateCamera(&world.previousCamera, &world.camera, 0.5f,
+                                &camera);
+    EXPECT_EQ(85, (int)(camera.transform.position.y * 10.0f));
+    EXPECT_EQ(75, (int)camera.verticalFovDegrees);
+    EXPECT_EQ(50, (int)(camera.fogColor.x * 100.0f));
+    EXPECT_EQ(39, (int)(camera.skyTopColor.x * 100.0f));
+    EXPECT_EQ(50, (int)(camera.skyColor.x * 100.0f));
+    EXPECT_EQ(60, (int)(camera.skyHorizonColor.x * 100.0f));
+    EXPECT_EQ(70, (int)(camera.skyBottomColor.x * 100.0f));
+    EXPECT_EQ(90, camera.skyAssetKey);
+    EXPECT_EQ(4, camera.skyCloudRow);
+    /* The row and texture identity changed together, so interpolation must
+     * not create an in-between grid which exists in neither renderer. */
+    EXPECT_EQ(-32, (int)camera.skyGridOrigin.x);
+    EXPECT_EQ(96, (int)camera.skyGridOrigin.y);
+    EXPECT_EQ(50, (int)(camera.skyGridColumn.z * 10.0f));
+    EXPECT_EQ(91, (int)camera.skyGridRow.z);
+    EXPECT_EQ(150, (int)camera.fogNear);
+    EXPECT_EQ(750, (int)camera.fogFar);
+
+    {
+        RenderCamera before = world.camera, after = world.camera, result;
+        before.hasSkyLayout = after.hasSkyLayout = 1;
+        before.skyLayout.tiles[1][3] = 0;
+        after.skyLayout.tiles[1][3] = 7;
+        before.skyGridOrigin.x = -100;
+        after.skyGridOrigin.x = 100;
+        RenderInterpolateCamera(&before, &after, 0.5f, &result);
+        EXPECT_EQ(1, result.hasSkyLayout);
+        EXPECT_EQ(7, result.skyLayout.tiles[1][3]);
+        EXPECT_EQ(100, (int)result.skyGridOrigin.x);
+    }
+
+    world.previousCamera.skyAssetKey = world.camera.skyAssetKey;
+    world.previousCamera.skyCloudRow = world.camera.skyCloudRow;
+    RenderInterpolateCamera(&world.previousCamera, &world.camera, 0.5f,
+                            &camera);
+    EXPECT_EQ(-64, (int)camera.skyGridOrigin.x);
+    EXPECT_EQ(104, (int)camera.skyGridOrigin.y);
+    EXPECT_EQ(45, (int)(camera.skyGridColumn.z * 10.0f));
+
+    /* Crossing the yaw wrap must advance 31 -> 32 (equivalent to zero in an
+     * eight-tile panorama), never interpolate backwards through 15.5. */
+    world.previousCamera.skyGridColumn.z = 31.0f;
+    world.camera.skyGridColumn.z = 0.0f;
+    world.previousCamera.skyGridOrigin.x = -317.0f;
+    world.camera.skyGridOrigin.x = -257.0f;
+    RenderInterpolateCamera(&world.previousCamera, &world.camera, 0.5f,
+                            &camera);
+    EXPECT_EQ(315, (int)(camera.skyGridColumn.z * 10.0f));
+    {
+        float texturePhase = camera.skyGridColumn.z +
+            (160.0f - camera.skyGridOrigin.x) / 64.0f;
+        EXPECT_EQ(384, (int)(texturePhase * 10.0f));
+    }
+}
+
+static void test_directional_light_is_scene_data(void) {
+    RenderMeshInstance storage[1];
+    RenderWorld world;
+    RenderDirectionalLight light;
+
+    RenderWorldInit(&world, storage, 1);
+    EXPECT_EQ(35, (int)(world.light.ambientColor.x * 100.0f));
+    EXPECT_EQ(65, (int)(world.light.diffuseColor.x * 100.0f));
+    light.direction = (Vec3){1.0f, 2.0f, 3.0f};
+    light.ambientColor = (Vec3){0.2f, 0.3f, 0.4f};
+    light.diffuseColor = (Vec3){0.8f, 0.7f, 0.6f};
+    RenderWorldSetDirectionalLight(&world, &light);
+    EXPECT_EQ(2, (int)world.light.direction.y);
+    EXPECT_EQ(30, (int)(world.light.ambientColor.y * 100.0f));
+    EXPECT_EQ(60, (int)(world.light.diffuseColor.z * 100.0f));
+}
+
+static void test_directional_light_follows_sky_time_and_color(void) {
+    RenderCamera day = {0}, sunset = {0};
+    RenderDirectionalLight dayLight, sunsetLight;
+
+    day.skyTopColor = (Vec3){0.45f, 0.70f, 1.0f};
+    day.skyHorizonColor = (Vec3){0.75f, 0.85f, 1.0f};
+    sunset.skyTopColor = (Vec3){0.05f, 0.04f, 0.10f};
+    sunset.skyHorizonColor = (Vec3){0.80f, 0.28f, 0.08f};
+    RenderDirectionalLightFromSky(&day, &dayLight);
+    RenderDirectionalLightFromSky(&sunset, &sunsetLight);
+
+    EXPECT_EQ(1, dayLight.direction.y > sunsetLight.direction.y);
+    EXPECT_EQ(1, sunsetLight.diffuseColor.x > sunsetLight.diffuseColor.z);
+    EXPECT_EQ(1, dayLight.diffuseColor.z > sunsetLight.diffuseColor.z);
+    {
+        float lengthSquared =
+            dayLight.direction.x * dayLight.direction.x +
+            dayLight.direction.y * dayLight.direction.y +
+            dayLight.direction.z * dayLight.direction.z;
+        EXPECT_EQ(1, lengthSquared > 0.999f && lengthSquared < 1.001f);
+    }
+}
+
+static void test_car_presentation_never_descends_below_ground(void) {
+    EXPECT_EQ(100, RenderClampCarToGround(104, 100));
+    EXPECT_EQ(100, RenderClampCarToGround(100, 100));
+    EXPECT_EQ(84, RenderClampCarToGround(84, 100));
+}
+
+static void test_mirror_is_an_independent_scene_camera(void) {
+    RenderMeshInstance storage[1];
+    RenderWorld world;
+    RenderCamera camera = {0};
+
+    RenderWorldInit(&world, storage, 1);
+    camera.transform.position.z = 100.0f;
+    camera.transform.rotation.y = 180.0f;
+    camera.verticalFovDegrees = 20.0f;
+    RenderWorldSetMirrorCamera(&world, &camera, 1, -12.0f);
+    EXPECT_EQ(1, world.hasMirrorCamera);
+    EXPECT_EQ(1, world.mirrorActive);
+    EXPECT_EQ(180, (int)world.mirrorCamera.transform.rotation.y);
+    EXPECT_EQ(20, (int)world.mirrorCamera.verticalFovDegrees);
+    EXPECT_EQ(-12, (int)world.mirrorPanelY);
+
+    RenderWorldBeginFrame(&world, 2);
+    camera.transform.position.z = 140.0f;
+    RenderWorldSetMirrorCamera(&world, &camera, 0, 18.0f);
+    RenderInterpolateCamera(&world.previousMirrorCamera,
+                                &world.mirrorCamera, 0.5f, &camera);
+    EXPECT_EQ(120, (int)camera.transform.position.z);
+    EXPECT_EQ(0, world.mirrorActive);
+    EXPECT_EQ(-12, (int)world.previousMirrorPanelY);
+    EXPECT_EQ(18, (int)world.mirrorPanelY);
+}
+
+static void test_camera_cuts_are_not_interpolated_as_motion(void) {
+    RenderMeshInstance storage[1];
+    RenderWorld world;
+    RenderCamera camera = {0};
+    RenderCamera presentation;
+
+    RenderWorldInit(&world, storage, 1);
+    camera.transform.hasOrientation = 1;
+    camera.transform.orientation.w = 1.0f;
+    camera.verticalFovDegrees = 45.0f;
+    RenderWorldSetCamera(&world, &camera);
+    RenderWorldBeginFrame(&world, 2);
+    camera.transform.position.x = 4096.0f;
+    camera.transform.orientation.y = 0.7071068f;
+    camera.transform.orientation.w = 0.7071068f;
+    RenderWorldSetCamera(&world, &camera);
+    RenderInterpolateCamera(&world.previousCamera, &world.camera, 0.1f,
+                                &presentation);
+    EXPECT_EQ(4096, (int)presentation.transform.position.x);
+    EXPECT_EQ(70, (int)(presentation.transform.orientation.y * 100.0f));
+    EXPECT_EQ(70, (int)(presentation.transform.orientation.w * 100.0f));
+}
+
+static void test_transform_interpolation_takes_short_angle_path(void) {
+    RenderTransform previous = {0};
+    RenderTransform current = {0};
+    RenderTransform presentation;
+
+    previous.rotation.y = 350.0f;
+    current.rotation.y = 10.0f;
+    RenderInterpolateTransform(&previous, &current, 0.5f, &presentation);
+    EXPECT_EQ(360, (int)presentation.rotation.y);
+    EXPECT_EQ(350, (int)previous.rotation.y);
+    EXPECT_EQ(10, (int)current.rotation.y);
+}
+
+static void test_transform_interpolation_normalizes_large_quaternions(void) {
+    RenderTransform previous = {0};
+    RenderTransform current = {0};
+    RenderTransform presentation;
+
+    previous.hasOrientation = current.hasOrientation = 1;
+    previous.orientation.y = current.orientation.y = FLT_MAX;
+    previous.orientation.w = current.orientation.w = FLT_MAX;
+    RenderInterpolateTransform(&previous, &current, 0.5f, &presentation);
+    EXPECT_EQ(1, presentation.hasOrientation);
+    EXPECT_EQ(70, (int)(presentation.orientation.y * 100.0f));
+    EXPECT_EQ(70, (int)(presentation.orientation.w * 100.0f));
+}
+
+static void test_interpolation_rejects_null_inputs(void) {
+    RenderTransform transform;
+    RenderCamera camera;
+
+    memset(&transform, 0x7f, sizeof(transform));
+    RenderInterpolateTransform(NULL, NULL, 0.5f, &transform);
+    EXPECT_EQ(0, (int)transform.position.x);
+    EXPECT_EQ(0, transform.hasOrientation);
+    RenderInterpolateTransform(NULL, NULL, 0.5f, NULL);
+
+    memset(&camera, 0x7f, sizeof(camera));
+    RenderInterpolateCamera(NULL, NULL, 0.5f, &camera);
+    EXPECT_EQ(0, (int)camera.verticalFovDegrees);
+    EXPECT_EQ(0, (int)camera.transform.position.x);
+    RenderInterpolateCamera(NULL, NULL, 0.5f, NULL);
+}
+
+static void test_non_finite_angles_do_not_stall_interpolation(void) {
+    RenderTransform previous = {0};
+    RenderTransform current = {0};
+    RenderTransform presentation;
+    RenderMeshInstance storage[1];
+    RenderWorld world;
+    RenderCamera camera = {0};
+
+    /* Compare against the previous bounded-domain algorithm, including ties.
+     * Quarter-degree steps are exact binary floats, avoiding oracle drift. */
+    for (int step = -5760; step <= 5760; ++step) {
+        float angle = (float)step * 0.25f;
+        float expected = angle;
+        while (expected > 180.0f) expected -= 360.0f;
+        while (expected < -180.0f) expected += 360.0f;
+        float actual = RenderLerpAngleDegrees(0.0f, angle, 0.5f);
+        EXPECT_EQ(1, actual == expected * 0.5f);
+    }
+
+    EXPECT_EQ(0, (int)RenderLerpAngleDegrees(0.0f, INFINITY, 0.5f));
+    EXPECT_EQ(0, (int)RenderLerpAngleDegrees(NAN, 10.0f, 0.5f));
+    EXPECT_EQ(1, isfinite(RenderLerpAngleDegrees(-FLT_MAX, FLT_MAX, 0.5f)));
+    EXPECT_EQ(1, isfinite(RenderLerpAngleDegrees(FLT_MAX, -FLT_MAX, 0.5f)));
+    const float largeAngles[] = {1e20f, -1e20f, FLT_MAX, -FLT_MAX};
+    for (unsigned i = 0; i < sizeof(largeAngles)/sizeof(largeAngles[0]); ++i) {
+        float interpolated = RenderLerpAngleDegrees(0.0f, largeAngles[i], 0.5f);
+        EXPECT_EQ(1, isfinite(interpolated) && fabsf(interpolated) <= 90.0f);
+        RenderWorldInit(&world, storage, 1);
+        camera.transform.rotation.y = 0.0f;
+        RenderWorldSetCamera(&world, &camera);
+        RenderWorldBeginFrame(&world, 2);
+        camera.transform.rotation.y = largeAngles[i];
+        RenderWorldSetCamera(&world, &camera);
+        EXPECT_EQ(1, world.hasCamera);
+    }
+    const float largePhases[] = {1e20f, -1e20f, FLT_MAX, -FLT_MAX, INFINITY, NAN};
+    for (int step = -512; step <= 512; ++step) {
+        RenderCamera before = {0}, after = {0}, result;
+        float expected = (float)step * 0.25f;
+        after.skyGridColumn.z = expected;
+        while (expected > 16.0f) expected -= 32.0f;
+        while (expected < -16.0f) expected += 32.0f;
+        RenderInterpolateCamera(&before, &after, 0.5f, &result);
+        EXPECT_EQ(1, result.skyGridColumn.z == expected * 0.5f);
+    }
+    for (unsigned i = 0; i < sizeof(largePhases)/sizeof(largePhases[0]); ++i) {
+        RenderCamera before = {0}, after = {0}, result;
+        after.skyGridColumn.z = largePhases[i];
+        RenderInterpolateCamera(&before, &after, 0.5f, &result);
+        EXPECT_EQ(1, isfinite(result.skyGridColumn.z));
+        EXPECT_EQ(1, fabsf(result.skyGridColumn.z) <= 8.0f);
+    }
+    previous.rotation.y = 10.0f;
+    current.rotation.y = 20.0f;
+    RenderInterpolateTransform(&previous, &current, NAN, &presentation);
+    EXPECT_EQ(10, (int)presentation.rotation.y);
+
+    RenderWorldInit(&world, storage, 1);
+    RenderWorldSetCamera(&world, &camera);
+    RenderWorldBeginFrame(&world, 2);
+    camera.transform.rotation.y = INFINITY;
+    RenderWorldSetCamera(&world, &camera);
+    EXPECT_EQ(1, isinf(world.previousCamera.transform.rotation.y));
+}
+
+static void test_perspective_fog_uses_authored_near_and_far_depths(void) {
+    RenderCamera camera = {0};
+    Vec3 point = {0.0f, 0.0f, -10.0f};
+    camera.fogNear = 10.0f;
+    camera.fogFar = 50.0f;
+    EXPECT_EQ(0, (int)(RenderFogFactor(&camera, &point) * 100.0f));
+    point.z = -25.0f;
+    EXPECT_EQ(75, (int)(RenderFogFactor(&camera, &point) * 100.0f));
+    point.z = -50.0f;
+    EXPECT_EQ(100, (int)(RenderFogFactor(&camera, &point) * 100.0f));
+}
+
+static void test_projection_rejects_non_finite_camera_data(void) {
+    RenderCamera camera = {0};
+    Vec3 view = {0.0f, 0.0f, -10.0f};
+    Vec3 clip;
+    float scale, offset;
+
+    camera.verticalFovDegrees = 60.0f;
+    camera.nearPlane = 1.0f;
+    camera.farPlane = 100.0f;
+    camera.fogNear = 1.0f;
+    camera.fogFar = 100.0f;
+    clip = (Vec3){1.0f, 2.0f, 3.0f};
+    EXPECT_EQ(0, RenderProject(&camera, &view, NAN, &clip));
+    EXPECT_EQ(0, (int)clip.x);
+    camera.verticalFovDegrees = INFINITY;
+    EXPECT_EQ(0, RenderProject(&camera, &view, 1.0f, &clip));
+    camera.verticalFovDegrees = 60.0f;
+    camera.farPlane = NAN;
+    scale = offset = 1.0f;
+    EXPECT_EQ(0, RenderPerspectiveDepthTerms(&camera, &scale, &offset));
+    EXPECT_EQ(0, (int)scale);
+    EXPECT_EQ(0, (int)offset);
+    camera.nearPlane = nextafterf(FLT_MAX, 0.0f);
+    camera.farPlane = FLT_MAX;
+    EXPECT_EQ(0, RenderPerspectiveDepthTerms(&camera, &scale, &offset));
+    camera.nearPlane = 1.0f;
+    camera.farPlane = 100.0f;
+    view.z = NAN;
+    EXPECT_EQ(0, RenderProject(&camera, &view, 1.0f, &clip));
+    view.z = -10.0f;
+    camera.fogFar = INFINITY;
+    EXPECT_EQ(0, (int)RenderFogFactor(&camera, &view));
+}
+
+static void test_gpu_projection_scales_are_bounded(void) {
+    RenderCamera camera = {0};
+    float horizontal, vertical;
+    const float fovs[] = {20.0f, 30.0f, 41.112f, 60.0f, 90.0f, 179.0f};
+    const float aspects[] = {1.0f, 4.0f / 3.0f, 16.0f / 9.0f, 148.0f / 36.0f};
+    for (size_t i = 0; i < sizeof(fovs) / sizeof(fovs[0]); i++) {
+        camera.verticalFovDegrees = fovs[i];
+        for (size_t j = 0; j < sizeof(aspects) / sizeof(aspects[0]); j++) {
+            float oldVertical = 1.0f / tanf(fovs[i] * 0.008726646259971648f);
+            float oldHorizontal = oldVertical / aspects[j];
+            EXPECT_EQ(1, RenderPerspectiveScales(&camera, aspects[j],
+                                                  &horizontal, &vertical));
+            EXPECT_EQ(0, memcmp(&oldVertical, &vertical, sizeof(float)));
+            EXPECT_EQ(0, memcmp(&oldHorizontal, &horizontal, sizeof(float)));
+        }
+    }
+    const float invalid[] = {0.0f, -1.0f, NAN, INFINITY, -INFINITY,
+                             FLT_TRUE_MIN, 180.0f, FLT_MAX};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        camera.verticalFovDegrees = invalid[i];
+        horizontal = vertical = 1.0f;
+        feclearexcept(FE_ALL_EXCEPT);
+        EXPECT_EQ(0, RenderPerspectiveScales(&camera, 1, &horizontal, &vertical));
+        EXPECT_EQ(0, fetestexcept(FE_DIVBYZERO | FE_INVALID | FE_OVERFLOW));
+        EXPECT_EQ(1, horizontal == 0.0f && vertical == 0.0f);
+    }
+    camera.verticalFovDegrees = 60.0f;
+    for (size_t i = 0; i < 6; i++) {
+        feclearexcept(FE_ALL_EXCEPT);
+        EXPECT_EQ(0, RenderPerspectiveScales(&camera, invalid[i],
+                                              &horizontal, &vertical));
+        EXPECT_EQ(0, fetestexcept(FE_DIVBYZERO | FE_INVALID | FE_OVERFLOW));
+    }
+    EXPECT_EQ(0, RenderPerspectiveScales(NULL, 1, &horizontal, &vertical));
+    EXPECT_EQ(0, RenderPerspectiveScales(&camera, 1, NULL, &vertical));
+    EXPECT_EQ(0, RenderPerspectiveScales(&camera, 1, &horizontal, NULL));
+}
+
+static void test_terrain_grid_places_adjacent_cells_without_overlap(void) {
+    RenderTransform left;
+    RenderTransform right;
+    RenderTransform south;
+
+    RenderTerrainCellTransform(0, 0, &left);
+    RenderTerrainCellTransform(1, 0, &right);
+    RenderTerrainCellTransform(0, 1, &south);
+    EXPECT_EQ(4096, (int)left.position.x);
+    EXPECT_EQ(258048, (int)left.position.z);
+    EXPECT_EQ(8192, (int)(right.position.x - left.position.x));
+    EXPECT_EQ(-8192, (int)(south.position.z - left.position.z));
+    EXPECT_EQ(1, (int)left.scale.x);
+}
+
+static void test_synchronized_presentation_keeps_previous_vehicle_models(void) {
+    RenderMeshInstance previousStorage[3] = {0};
+    RenderMeshInstance currentStorage[3] = {0};
+    RenderMeshInstance presentation[4] = {0};
+    RenderWorld previous;
+    RenderWorld current;
+    uint32_t count;
+
+    RenderWorldInit(&previous, previousStorage, 3);
+    RenderWorldInit(&current, currentStorage, 3);
+    previousStorage[0].entity = 10;
+    previousStorage[0].mesh = 30;
+    previousStorage[0].assetSet = RAGE_RENDER_ASSET_TRACK_MODEL_BANK_1;
+    previousStorage[0].assetKey = 88;
+    previousStorage[0].materialVariant = 29;
+    previousStorage[0].transform.position.x = 10.0f;
+    previous.instanceCount = 1;
+
+    /* The next intro tick sees another rival. It must not replace the model
+     * while presentation is still compositing the previous logic frame. */
+    currentStorage[0].entity = 3;
+    currentStorage[0].mesh = 15;
+    currentStorage[0].assetSet = RAGE_RENDER_ASSET_TRACK_MODEL_BANK_1;
+    currentStorage[0].assetKey = 88;
+    currentStorage[0].materialVariant = 27;
+    currentStorage[0].transform.position.x = 100.0f;
+    currentStorage[1].entity = 0x10000;
+    currentStorage[1].mesh = 4;
+    currentStorage[1].assetSet = RAGE_RENDER_ASSET_COURSE;
+    currentStorage[1].assetKey = 88;
+    currentStorage[1].previousTransform.position.x = 20.0f;
+    currentStorage[1].transform.position.x = 40.0f;
+    current.instanceCount = 2;
+
+    count = RenderWorldBuildSynchronizedPresentation(
+        &previous, &current, 0.5f, presentation, 4);
+    EXPECT_EQ(2, count);
+    EXPECT_EQ(RAGE_RENDER_ASSET_COURSE, presentation[0].assetSet);
+    EXPECT_EQ(30, (int)presentation[0].transform.position.x);
+    EXPECT_EQ(RAGE_RENDER_ASSET_TRACK_MODEL_BANK_1,
+              presentation[1].assetSet);
+    EXPECT_EQ(10, presentation[1].entity);
+    EXPECT_EQ(30, presentation[1].mesh);
+    EXPECT_EQ(10, (int)presentation[1].transform.position.x);
+}
+
+static void test_synchronized_presentation_moves_matching_vehicle(void) {
+    RenderMeshInstance previousStorage[1] = {0};
+    RenderMeshInstance currentStorage[1] = {0};
+    RenderMeshInstance presentation[1] = {0};
+    RenderWorld previous;
+    RenderWorld current;
+
+    RenderWorldInit(&previous, previousStorage, 1);
+    RenderWorldInit(&current, currentStorage, 1);
+    previousStorage[0].entity = currentStorage[0].entity = 7;
+    previousStorage[0].mesh = currentStorage[0].mesh = 25;
+    previousStorage[0].assetSet = currentStorage[0].assetSet =
+        RAGE_RENDER_ASSET_TRACK_MODEL_BANK_1;
+    previousStorage[0].assetKey = currentStorage[0].assetKey = 88;
+    previousStorage[0].materialVariant = currentStorage[0].materialVariant = 28;
+    previousStorage[0].transform.position.z = 100.0f;
+    currentStorage[0].transform.position.z = 140.0f;
+    previousStorage[0].lamps = (CarLights){0, 0, 1, 1, 0};
+    currentStorage[0].lamps = (CarLights){1, 0.2f, 0, 1, 0};
+    previous.instanceCount = current.instanceCount = 1;
+
+    EXPECT_EQ(1, RenderWorldBuildSynchronizedPresentation(
+                     &previous, &current, 0.25f, presentation, 1));
+    EXPECT_EQ(25, presentation[0].mesh);
+    EXPECT_EQ(110, (int)presentation[0].transform.position.z);
+    EXPECT_EQ(1, fabsf(presentation[0].lamps.headlights - 0.25f) < 0.00001f);
+    EXPECT_EQ(1, fabsf(presentation[0].lamps.tail - 0.05f) < 0.00001f);
+    EXPECT_EQ(1, presentation[0].lamps.stop == 0);
+    for (int braking = 0; braking < 2; ++braking) {
+        previousStorage[0].lamps.stop = (float)!braking;
+        currentStorage[0].lamps.stop = (float)braking;
+        for (int sample = 0; sample <= 8; ++sample) {
+            EXPECT_EQ(1, RenderWorldBuildSynchronizedPresentation(
+                &previous, &current, sample / 8.0f, presentation, 1));
+            EXPECT_EQ(braking, (int)presentation[0].lamps.stop);
+        }
+    }
+
+}
+
+static void test_synchronized_presentation_keeps_wheel_sides_paired(void) {
+    RenderMeshInstance previousStorage[2] = {0};
+    RenderMeshInstance currentStorage[2] = {0};
+    RenderMeshInstance presentation[2] = {0};
+    RenderWorld previous;
+    RenderWorld current;
+    unsigned i;
+
+    RenderWorldInit(&previous, previousStorage, 2);
+    RenderWorldInit(&current, currentStorage, 2);
+    for (i = 0; i < 2; i++) {
+        previousStorage[i].entity = currentStorage[i].entity = 11;
+        previousStorage[i].mesh = currentStorage[i].mesh = 14;
+        previousStorage[i].assetSet = currentStorage[i].assetSet =
+            RAGE_RENDER_ASSET_MODEL_BANK;
+        previousStorage[i].assetKey = currentStorage[i].assetKey = 20;
+        previousStorage[i].component = currentStorage[i].component =
+            (uint8_t)(3 + i);
+    }
+    previousStorage[0].transform.position.x = -10.0f;
+    previousStorage[1].transform.position.x = 10.0f;
+    currentStorage[0].transform.position.x = 12.0f;
+    currentStorage[1].transform.position.x = -12.0f;
+    previous.instanceCount = current.instanceCount = 2;
+
+    EXPECT_EQ(2, RenderWorldBuildSynchronizedPresentation(
+                     &previous, &current, 0.5f, presentation, 2));
+    EXPECT_EQ(3, presentation[0].component);
+    EXPECT_EQ(1, (int)presentation[0].transform.position.x);
+    EXPECT_EQ(4, presentation[1].component);
+    EXPECT_EQ(-1, (int)presentation[1].transform.position.x);
+}
+
+static void test_synchronized_presentation_matches_animated_wheel_mesh(void) {
+    RenderMeshInstance previousStorage[1] = {0};
+    RenderMeshInstance currentStorage[1] = {0};
+    RenderMeshInstance presentation[1] = {0};
+    RenderWorld previous;
+    RenderWorld current;
+
+    RenderWorldInit(&previous, previousStorage, 1);
+    RenderWorldInit(&current, currentStorage, 1);
+    previousStorage[0].entity = currentStorage[0].entity = 11;
+    previousStorage[0].component = currentStorage[0].component = 2;
+    previousStorage[0].mesh = 3;
+    currentStorage[0].mesh = 13;
+    previousStorage[0].assetSet = currentStorage[0].assetSet =
+        RAGE_RENDER_ASSET_MODEL_BANK;
+    previousStorage[0].assetKey = currentStorage[0].assetKey = 20;
+    previousStorage[0].transform.position.z = 100.0f;
+    currentStorage[0].transform.position.z = 140.0f;
+    previous.instanceCount = current.instanceCount = 1;
+
+    EXPECT_EQ(1, RenderWorldBuildSynchronizedPresentation(
+                     &previous, &current, 0.25f, presentation, 1));
+    EXPECT_EQ(3, presentation[0].mesh);
+    EXPECT_EQ(110, (int)presentation[0].transform.position.z);
+}
+
+static void test_synchronized_presentation_moves_dynamic_scenery(void) {
+    RenderMeshInstance previousStorage[1] = {0};
+    RenderMeshInstance currentStorage[1] = {0};
+    RenderMeshInstance presentation[1] = {0};
+    RenderWorld previous;
+    RenderWorld current;
+
+    RenderWorldInit(&previous, previousStorage, 1);
+    RenderWorldInit(&current, currentStorage, 1);
+    previousStorage[0].entity = currentStorage[0].entity = 0x30110u;
+    previousStorage[0].assetSet = currentStorage[0].assetSet =
+        RAGE_RENDER_ASSET_COURSE;
+    previousStorage[0].assetKey = currentStorage[0].assetKey = 88;
+    previousStorage[0].mesh = currentStorage[0].mesh = 63;
+    previousStorage[0].transform.position.x = 10.0f;
+    currentStorage[0].transform.position.x = 30.0f;
+    currentStorage[0].previousTransform = currentStorage[0].transform;
+    previous.instanceCount = current.instanceCount = 1;
+
+    EXPECT_EQ(1, RenderWorldBuildSynchronizedPresentation(
+                     &previous, &current, 0.5f, presentation, 1));
+    EXPECT_EQ(20, (int)presentation[0].transform.position.x);
+}
+
+static void test_synchronized_presentation_rejects_invalid_world_bounds(void) {
+    RenderMeshInstance instance = {0};
+    RenderMeshInstance presentation;
+    RenderWorld previous;
+    RenderWorld current;
+
+    RenderWorldInit(&previous, &instance, 1);
+    RenderWorldInit(&current, &instance, 1);
+    previous.instanceCount = 2;
+    EXPECT_EQ(0, RenderWorldBuildSynchronizedPresentation(
+                     &previous, &current, 0.5f, &presentation, 1));
+
+    previous.instanceCount = 0;
+    current.instanceCapacity = RAGE_RENDER_PRESENTATION_MAX_INSTANCES + 1;
+    current.instanceCount = RAGE_RENDER_PRESENTATION_MAX_INSTANCES + 1;
+    EXPECT_EQ(0, RenderWorldBuildSynchronizedPresentation(
+                     &previous, &current, 0.5f, &presentation, 1));
+
+    RenderMeshInstance sources[2] = {0};
+    sources[0].assetSet = sources[1].assetSet = RAGE_RENDER_ASSET_TERRAIN;
+    RenderWorldInit(&previous, sources, 2);
+    RenderWorldInit(&current, sources, 2);
+    current.instanceCount = 2;
+    memset(&presentation, 0x5a, sizeof(presentation));
+    RenderMeshInstance sentinel = presentation;
+    EXPECT_EQ(0, RenderWorldBuildSynchronizedPresentation(
+                     &previous, &current, 0.5f, &presentation, 1));
+    EXPECT_EQ(0, memcmp(&presentation, &sentinel, sizeof(presentation)));
+    uint32_t checkedCount = 77;
+    EXPECT_EQ(0, RenderWorldTryBuildSynchronizedPresentation(
+        &previous, &current, 0.5f, &presentation, 1, &checkedCount));
+    EXPECT_EQ(77, checkedCount);
+    RenderWorld empty = {0};
+    EXPECT_EQ(1, RenderWorldTryBuildSynchronizedPresentation(
+        &empty, &empty, 0.5f, &presentation, 1, &checkedCount));
+    EXPECT_EQ(0, checkedCount);
+    EXPECT_EQ(0, memcmp(&presentation, &sentinel, sizeof(presentation)));
+    RenderWorld incomplete = empty;
+    incomplete.overflowCount = 1;
+    checkedCount = 77;
+    EXPECT_EQ(0, RenderWorldTryBuildSynchronizedPresentation(
+        &incomplete, &empty, 0.5f, &presentation, 1, &checkedCount));
+    EXPECT_EQ(77, checkedCount);
+    EXPECT_EQ(0, RenderWorldTryBuildSynchronizedPresentation(
+        &empty, &incomplete, 0.5f, &presentation, 1, &checkedCount));
+    EXPECT_EQ(77, checkedCount);
+    EXPECT_EQ(0, memcmp(&presentation, &sentinel, sizeof(presentation)));
+    sources[1].assetSet = RAGE_RENDER_ASSET_MODEL_BANK;
+    sources[1].entity = 11;
+    previous.instances = &sources[1];
+    previous.instanceCount = previous.instanceCapacity = 1;
+    current.instanceCount = 1;
+    EXPECT_EQ(0, RenderWorldBuildSynchronizedPresentation(
+                     &previous, &current, 0.5f, &presentation, 1));
+    EXPECT_EQ(0, memcmp(&presentation, &sentinel, sizeof(presentation)));
+}
+
+static void test_native_camera_projection_has_no_gte_quantization(void) {
+    RenderCamera camera = {0};
+    Vec3 world = {10.0f, 5.0f, -100.0f};
+    Vec3 view;
+    Vec3 clip;
+    float depthScale;
+    float depthOffset;
+
+    camera.verticalFovDegrees = 90.0f;
+    camera.nearPlane = 1.0f;
+    camera.farPlane = 1000.0f;
+    RenderWorldToView(&camera, &world, &view);
+    EXPECT_EQ(10, (int)view.x);
+    EXPECT_EQ(-100, (int)view.z);
+    EXPECT_EQ(1, RenderProject(&camera, &view, 2.0f, &clip));
+    EXPECT_EQ(5, (int)(clip.x * 100.0f));
+    EXPECT_EQ(5, (int)(clip.y * 100.0f));
+    EXPECT_EQ(1, RenderPerspectiveDepthTerms(
+                     &camera, &depthScale, &depthOffset));
+    /* The GPU must receive a projective clip-space Z. A quadratic per-vertex
+     * value makes a near terrain triangle intersect the camera planes at the
+     * wrong place when one of its vertices is behind the cockpit camera. */
+    EXPECT_EQ(0, (int)((camera.nearPlane * depthScale + depthOffset) * 1000.0f));
+    EXPECT_EQ(1000, (int)(((camera.farPlane * depthScale + depthOffset) /
+                           camera.farPlane) * 1000.0f));
+    EXPECT_EQ(1, (-depthScale + depthOffset) < 0.0f);
+    camera.transform.rotation.y = -90.0f;
+    world.x = 100.0f; world.z = 0.0f;
+    RenderWorldToView(&camera, &world, &view);
+    EXPECT_EQ(-100, (int)view.z);
+}
+
+static void test_psx_rotation_uses_the_same_basis_as_imported_positions(void) {
+    const float source[3][3] = {
+        {0.0f, 0.0f, 1.0f},
+        {0.0f, 1.0f, 0.0f},
+        {-1.0f, 0.0f, 0.0f},
+    };
+    float converted[3][3];
+    RenderConvertPsxMatrix(source, converted);
+    EXPECT_EQ(-1, (int)converted[0][2]);
+    EXPECT_EQ(1, (int)converted[1][1]);
+    EXPECT_EQ(1, (int)converted[2][0]);
+}
+
+static void test_directional_shadow_map_is_texel_stable(void) {
+    Vec3 light = RAGE_RENDER_DEFAULT_LIGHT_DIRECTION;
+    Vec3 center = {1000.0f, 200.0f, -500.0f};
+    Vec3 moved = center;
+    Vec3 projected;
+    RenderShadowMap first;
+    RenderShadowMap second;
+    float firstRight;
+    float secondRight;
+
+    EXPECT_EQ(1, RenderBuildDirectionalShadowMap(
+                     &center, &light, 4096.0f, 2048, &first));
+    moved.x += first.texelWorldSize * 0.1f;
+    EXPECT_EQ(1, RenderBuildDirectionalShadowMap(
+                     &moved, &light, 4096.0f, 2048, &second));
+    firstRight = first.position.x * first.row0.x +
+                 first.position.y * first.row0.y +
+                 first.position.z * first.row0.z;
+    secondRight = second.position.x * second.row0.x +
+                  second.position.y * second.row0.y +
+                  second.position.z * second.row0.z;
+    EXPECT_EQ(1, firstRight - secondRight < 0.01f &&
+                 firstRight - secondRight > -0.01f);
+    RenderProjectShadowPoint(&first, &center, &projected);
+    EXPECT_EQ(0, (int)(projected.x * 100.0f));
+    EXPECT_EQ(0, (int)(projected.y * 100.0f));
+    EXPECT_EQ(50, (int)(projected.z * 100.0f));
+}
+
+static void test_high_resolution_vehicle_shadow_density(void) {
+    Vec3 light = RAGE_RENDER_DEFAULT_LIGHT_DIRECTION;
+    Vec3 center = {0.0f, 0.0f, 0.0f};
+    RenderShadowMap shadow;
+
+    EXPECT_EQ(1, RenderBuildDirectionalShadowMap(
+                     &center, &light, RAGE_RENDER_VEHICLE_SHADOW_EXTENT,
+                     RAGE_RENDER_VEHICLE_SHADOW_RESOLUTION, &shadow));
+    EXPECT_EQ(200, (int)(shadow.texelWorldSize * 100.0f));
+}
+
+static void test_shadow_map_rejects_non_finite_geometry(void) {
+    Vec3 center = {0.0f, 0.0f, 0.0f};
+    Vec3 light = RAGE_RENDER_DEFAULT_LIGHT_DIRECTION;
+    RenderShadowMap shadow;
+
+    center.x = INFINITY;
+    EXPECT_EQ(0, RenderBuildDirectionalShadowMap(
+                     &center, &light, 4096.0f, 2048, &shadow));
+    center.x = 0.0f;
+    light.y = NAN;
+    EXPECT_EQ(0, RenderBuildDirectionalShadowMap(
+                     &center, &light, 4096.0f, 2048, &shadow));
+    light = RAGE_RENDER_DEFAULT_LIGHT_DIRECTION;
+    EXPECT_EQ(0, RenderBuildDirectionalShadowMap(
+                     &center, &light, INFINITY, 2048, &shadow));
+    memset(&shadow, 0x7f, sizeof(shadow));
+    EXPECT_EQ(0, RenderBuildDirectionalShadowMap(
+                     &center, &light, FLT_MIN, UINT32_MAX, &shadow));
+    EXPECT_EQ(0, (int)shadow.texelWorldSize);
+
+    light = (Vec3){0.0f, FLT_MAX, 0.0f};
+    EXPECT_EQ(1, RenderBuildDirectionalShadowMap(
+                     &center, &light, 4096.0f, 2048, &shadow));
+    EXPECT_EQ(1, shadow.row2.y > 0.99f);
+
+    {
+        Vec3 projected = {1.0f, 2.0f, 3.0f};
+        Vec3 invalidPoint = {INFINITY, 0.0f, 0.0f};
+
+        RenderProjectShadowPoint(&shadow, &invalidPoint, &projected);
+        EXPECT_EQ(0, (int)projected.x);
+        EXPECT_EQ(0, (int)projected.y);
+        EXPECT_EQ(0, (int)projected.z);
+    }
+}
+
+static void test_default_shadow_light_exposes_vehicle_footprint(void) {
+    const Vec3 light = RAGE_RENDER_DEFAULT_LIGHT_DIRECTION;
+    float horizontalSquared = light.x * light.x + light.z * light.z;
+    /* A useful chase-camera shadow needs a lateral offset, while remaining
+     * predominantly overhead so it stays close to the vehicle. */
+    EXPECT_EQ(1, light.y > 0.0f);
+    EXPECT_EQ(1, horizontalSquared * 4.0f > light.y * light.y);
+    EXPECT_EQ(1, horizontalSquared < light.y * light.y);
+}
+
+static void test_spot_lights_validate_and_reset(void) {
+    RenderWorld world = {0};
+    SpotLight light = {
+        .position = {1, 2, 3}, .range = 100,
+        .direction = {0, 0, -2}, .outerCos = 0.7f,
+        .color = {2, 1, 0.5f}, .innerCos = 0.9f,
+    };
+    EXPECT_EQ(1, !!(RenderWorldSubmitSpotLight(&world, &light)));
+    EXPECT_EQ(1, !!(world.spotLights[0].direction.z == -1));
+    EXPECT_EQ(1, !!(world.spotLightCount == 1));
+    light.range = 0;
+    EXPECT_EQ(1, !!(!RenderWorldSubmitSpotLight(&world, &light)));
+    light.range = 100;
+    light.direction.z = NAN;
+    EXPECT_EQ(1, !!(!RenderWorldSubmitSpotLight(&world, &light)));
+    light.direction.z = -1;
+    light.outerCos = light.innerCos;
+    EXPECT_EQ(1, !!(!RenderWorldSubmitSpotLight(&world, &light)));
+    light.outerCos = 0.7f;
+    for (int i = 1; i < RENDER_SPOT_LIGHT_CAPACITY; i++)
+        EXPECT_EQ(1, !!(RenderWorldSubmitSpotLight(&world, &light)));
+    EXPECT_EQ(1, !!(!RenderWorldSubmitSpotLight(&world, &light)));
+    EXPECT_EQ(1, !!(world.spotLightCount == RENDER_SPOT_LIGHT_CAPACITY));
+    RenderWorldBeginFrame(&world, 5);
+    EXPECT_EQ(1, !!(world.spotLightCount == 0));
+}
+
+static void test_light_volume_culling(void) {
+    RenderCamera camera = {0};
+    camera.verticalFovDegrees = 90;
+    camera.nearPlane = 1;
+    camera.farPlane = 1000;
+    RenderViewTransform view = RenderPrepareView(&camera);
+    EXPECT_EQ(1, RenderSphereInView(&view, 1, (Vec3){0, 0, -100}, 1));
+    EXPECT_EQ(0, RenderSphereInView(&view, 1, (Vec3){0, 0, 100}, 99));
+    EXPECT_EQ(1, RenderSphereInView(&view, 1, (Vec3){0, 0, 100}, 102));
+    EXPECT_EQ(0, RenderSphereInView(&view, 1, (Vec3){0, 0, -1100}, 99));
+    EXPECT_EQ(1, RenderSphereInView(&view, 1, (Vec3){0, 0, -1100}, 100));
+    /* The centre is outside, but the volume still intersects a side plane. */
+    EXPECT_EQ(1, RenderSphereInView(&view, 1, (Vec3){113, 0, -100}, 10));
+    EXPECT_EQ(0, RenderSphereInView(&view, 1, (Vec3){115, 0, -100}, 10));
+    EXPECT_EQ(1, RenderSphereInView(&view, 2, (Vec3){200, 0, -100}, 10));
+    EXPECT_EQ(0, RenderSphereInView(&view, 2, (Vec3){0, 115, -100}, 10));
+}
+
+int main(void) {
+    test_light_volume_culling();
+    test_spot_lights_validate_and_reset();
+    test_frame_reset_preserves_storage_and_resets_overflow();
+    test_mesh_submission_rejects_invalid_storage();
+    test_public_world_mutators_reject_null_inputs();
+    test_legacy_mirror_instances_can_be_removed_from_scene();
+    test_camera_is_scene_data_not_backend_state();
+    test_directional_light_is_scene_data();
+    test_directional_light_follows_sky_time_and_color();
+    test_car_presentation_never_descends_below_ground();
+    test_mirror_is_an_independent_scene_camera();
+    test_camera_cuts_are_not_interpolated_as_motion();
+    test_transform_interpolation_takes_short_angle_path();
+    test_transform_interpolation_normalizes_large_quaternions();
+    test_interpolation_rejects_null_inputs();
+    test_non_finite_angles_do_not_stall_interpolation();
+    test_perspective_fog_uses_authored_near_and_far_depths();
+    test_projection_rejects_non_finite_camera_data();
+    test_gpu_projection_scales_are_bounded();
+    test_terrain_grid_places_adjacent_cells_without_overlap();
+    test_synchronized_presentation_keeps_previous_vehicle_models();
+    test_synchronized_presentation_moves_matching_vehicle();
+    test_synchronized_presentation_keeps_wheel_sides_paired();
+    test_synchronized_presentation_matches_animated_wheel_mesh();
+    test_synchronized_presentation_moves_dynamic_scenery();
+    test_synchronized_presentation_rejects_invalid_world_bounds();
+    test_native_camera_projection_has_no_gte_quantization();
+    test_default_shadow_light_exposes_vehicle_footprint();
+    test_psx_rotation_uses_the_same_basis_as_imported_positions();
+    test_directional_shadow_map_is_texel_stable();
+    test_high_resolution_vehicle_shadow_density();
+    test_shadow_map_rejects_non_finite_geometry();
+    if (failures != 0) return EXIT_FAILURE;
+    puts("render world tests passed");
+    return EXIT_SUCCESS;
+}

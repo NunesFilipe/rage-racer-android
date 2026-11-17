@@ -1,0 +1,52 @@
+#include "game/asset.h"
+#include "game/menu.h"
+#include "game/race.h"
+#include "game/render_internal.h"
+#include "game/scene.h"
+#include "game/state.h"
+
+enum {
+    ATTRACT_RENDER_OT_SHIFT = 5,
+    ATTRACT_VIEW_Z = -3520,
+    ATTRACT_LETTERBOX_HEIGHT = 240,
+};
+
+static void InitAttractLighting(void) {
+    g_SceneColorMatrix = g_DefaultColorMatrix;
+    g_SceneLightMatrix = g_DefaultLightMatrix;
+    SetColorMatrix(&g_SceneColorMatrix);
+    SetLightMatrix(&g_SceneLightMatrix);
+    SetBackColor(0x20, 0x20, 0x20);
+    SetFarColor(0, 0, 0);
+    SetFogNear(0x4E20, 0x140);
+}
+
+void EnterAttractScene(void) {
+    SetDispMask(0);
+    g_FrameSyncThreshold = 0x80;
+    if (!AssetLoadCompletedSuccessfully()) {
+        return;
+    }
+
+    if (!UploadImageAsset(GetImageAssetHeaderWords(g_ImageBlockBuffer),
+                          g_ImageBlockSize)) {
+        return;
+    }
+    g_MirrorMode = 0;
+    InitRenderState(ATTRACT_RENDER_OT_SHIFT);
+    SetupDisplay480(0, 0, 0);
+    g_SceneId = GAME_SCENE_OPTION;
+    g_SceneTimer = 0;
+    InitAttractLighting();
+    g_Camera.view.x = 0;
+    g_Camera.view.y = 0;
+    g_Camera.view.z = ATTRACT_VIEW_Z;
+    g_Camera.view.angleX = 0;
+    g_Camera.view.angleY = 0;
+    g_Camera.view.angleZ = 0;
+    SetCameraRotMatrix(&g_RenderState, &g_Camera.view);
+    MenuOption()->letterboxHeight = ATTRACT_LETTERBOX_HEIGHT;
+    /* The fade-in itself is armed by UpdateOptionScene on its first frame;
+     * the scene runtime clears g_FadeLevel/g_FadeStep before that dispatch. */
+    g_GameMode = OPTION_MODE_FADE;
+}

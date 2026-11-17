@@ -1,0 +1,341 @@
+#include "render/car_lights.h"
+#include "render/car_lamps.h"
+
+#include <math.h>
+#include <stdio.h>
+
+static int failures;
+#define CHECK(x) do { if (!(x)) { \
+    fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); \
+    failures++; } } while (0)
+
+int main(void) {
+    CarLights car = {0}, rival = {0};
+    /* Captured Mythical Coast palettes: the sunset horizon is almost as
+     * luminous as the daytime one, but should still turn the lamps on. */
+    float day = CarLightDaylight((Vec3){14.f/255, 30.f/255, 78.f/255},
+                                (Vec3){96.f/255, 136.f/255, 184.f/255});
+    float dusk = CarLightDaylight((Vec3){26.f/255, 26.f/255, 45.f/255},
+                                 (Vec3){163.f/255, 125.f/255, 59.f/255});
+    UpdateCarLights(&car, day, 1, 0, 1);
+    CHECK(car.headlights == 0);
+    UpdateCarLights(&car, dusk, 1, 0, 1);
+    CHECK(car.headlights == 1 && car.tail == 0.4f);
+    UpdateCarLights(&car, day, 1, 0, 1);
+    CHECK(car.headlights == 0 && car.tail == 0.2f);
+    UpdateCarLights(&car, day, 0.25f, 0, 1);
+    CHECK(car.headlights == 1);
+    car = (CarLights){0};
+    UpdateCarLights(&car, 1, 1, 0, 1);
+    CHECK(car.headlights == 0 && car.tail == 0.2f && car.stop == 0);
+    UpdateCarLights(&car, 1, 1, 1, 0.02f);
+    CHECK(car.stop == 1 && car.headlights == 0);
+    UpdateCarLights(&car, 1, 0.25f, 0, 0.1f);
+    CHECK(!car.automatic && car.headlights == 0);
+    CHECK(car.tail > 0 && car.stop == 0);
+    UpdateCarLights(&car, 1, 0.25f, 0, 0.6f);
+    UpdateCarLights(&car, 1, 0.32f, 0, 1);
+    CHECK(car.automatic && car.headlights == 1);
+    UpdateCarLights(&car, 1, 1, 0, 1);
+    CHECK(!car.automatic && car.headlights == 0);
+    UpdateCarLights(&car, 1, 0.32f, 0, 1);
+    CHECK(!car.automatic && car.headlights == 0);
+    UpdateCarLights(&car, 0.1f, 1, 1, 1);
+    CHECK(car.headlights == 1 && car.stop == 1 && car.tail < car.stop);
+    UpdateCarLights(&rival, 0.1f, 1, 1, 1);
+    CHECK(rival.headlights == car.headlights && rival.stop == car.stop);
+    UpdateCarLights(&car, 1, 1, 0, 0);
+    CHECK(car.headlights == 1 && car.stop == 1);
+    UpdateCarLights(&car, 1, 1, 0, NAN);
+    CHECK(car.headlights == 1 && car.stop == 1);
+    UpdateCarLights(&car, 1, 1, 0, -1);
+    CHECK(car.headlights == 1 && car.stop == 1);
+    /* One second produces the same settled state at PAL/NTSC tick rates. */
+    car = (CarLights){0};
+    rival = (CarLights){0};
+    for (int i = 0; i < 50; i++) UpdateCarLights(&car, 0, 1, 0, 1.0f/50);
+    for (int i = 0; i < 60; i++) UpdateCarLights(&rival, 0, 1, 0, 1.0f/60);
+    CHECK(car.headlights == 1 && rival.headlights == 1);
+    CHECK(CarLampIntensity(&(CarLights){0, 0.2f, 1, 0, 0}, LAMP_TAIL) == 0.2f);
+    CHECK(CarLampIntensity(&(CarLights){0, 0.2f, 1, 0, 0}, LAMP_STOP) == 1);
+    CHECK(CarLampIntensity(&(CarLights){0, 0.2f, 1, 0, 0}, LAMP_TAIL_STOP) == 1);
+    /* Repeated short shadows must not accumulate into a tunnel entry. */
+    car = (CarLights){0};
+    for (int shadow = 0; shadow < 10; ++shadow) {
+        for (int tick = 0; tick < 20; ++tick)
+            UpdateCarLights(&car, 0, 1, 0, 1.0f / 60);
+        CHECK(!car.automatic && car.headlights == 0 && car.tail == 0.2f);
+        UpdateCarLights(&car, 1, 1, 0, 1.0f / 60);
+        CHECK(car.darkSeconds == 0);
+    }
+    /* Pausing midway through the delay preserves its elapsed time. */
+    UpdateCarLights(&car, 0, 1, 0, 0.3f);
+    UpdateCarLights(&car, 0, 1, 0, 0);
+    CHECK(car.darkSeconds == 0.3f && !car.automatic);
+    UpdateCarLights(&car, 0, 1, 0, 0.3f);
+    CHECK(car.automatic);
+    RenderMeshInstance body = {0};
+    body.assetSet = RAGE_RENDER_ASSET_MODEL_BANK;
+    body.assetKey = 68;
+    body.lamps.headlights = 1;
+    body.transform.scale = (Vec3){0.25f, 0.25f, 0.25f};
+    body.transform.position = (Vec3){10, 20, 30};
+    RenderWorld world;
+    RenderWorldInit(&world, &body, 1);
+    world.instanceCount = 1;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 2);
+    CHECK(fabsf(world.spotLights[0].position.x - (10 + 91.88095f * 0.25f)) < 0.001f);
+    CHECK(fabsf(world.spotLights[0].position.z - (30 + 434.88889f * 0.25f)) < 0.001f);
+    CHECK(world.spotLights[0].direction.z > 0.97f);
+    CHECK(world.spotLights[0].direction.y > 0.20f);
+    world.spotLightCount = 0;
+    body.transform.hasOrientation = 1;
+    body.transform.orientation = (Quaternion){0, 1, 0, 0};
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLights[0].direction.z < -0.97f);
+    CHECK(fabsf(world.spotLights[0].position.z - (30 - 434.88889f * 0.25f)) < 0.001f);
+    world.spotLightCount = 0;
+    body.lamps.headlights = 0;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 0);
+    body.lamps.headlights = 1;
+    body.lamps.tail = 0.2f;
+    body.lamps.stop = 1;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 4);
+    CHECK(world.spotLights[2].direction.z > 0.99f); /* Rotated rear faces away from front. */
+    CHECK(world.spotLights[2].color.x == 1.5f);
+    CHECK(world.spotLights[2].position.x < body.transform.position.x);
+    CHECK(world.spotLights[3].position.x > body.transform.position.x);
+    world.spotLightCount = 0;
+    body.pass = RAGE_RENDER_PASS_MIRROR;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 0);
+    body.pass = RAGE_RENDER_PASS_MAIN;
+    body.assetSet = RAGE_RENDER_ASSET_TRACK_MODEL_BANK_1;
+    body.assetKey = 128;
+    body.transform.hasOrientation = 0;
+    body.lamps = (CarLights){0, 0.2f, 0, 1, 0};
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 2);
+    CHECK(world.spotLights[0].position.x < body.transform.position.x);
+    CHECK(world.spotLights[1].position.x > body.transform.position.x);
+    CHECK(world.spotLights[0].direction.z < -0.99f);
+    CHECK(world.spotLights[1].direction.z < -0.99f);
+    float tail = world.spotLights[0].color.x;
+    world.spotLightCount = 0;
+    body.lamps.stop = 1;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 2);
+    CHECK(fabsf(world.spotLights[0].color.x - 5 * tail) < 0.0001f);
+    CHECK(world.spotLights[0].color.x == world.spotLights[1].color.x);
+    /* Changing body detail must not switch off or move the light sources. */
+    body.lamps = (CarLights){1, 0.2f, 1, 1, 0};
+    world.spotLightCount = 0;
+    RenderCarSpotLights(&world);
+    SpotLight nearLights[4];
+    for (int i = 0; i < 4; ++i) nearLights[i] = world.spotLights[i];
+    body.mesh = 4;
+    world.spotLightCount = 0;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 4);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(world.spotLights[i].position.x == nearLights[i].position.x);
+        CHECK(world.spotLights[i].position.y == nearLights[i].position.y);
+        CHECK(world.spotLights[i].position.z == nearLights[i].position.z);
+        CHECK(world.spotLights[i].color.x == nearLights[i].color.x);
+    }
+    body.mesh = 5;
+    body.lamps = (CarLights){1, 0.2f, 0, 1, 0};
+    world.spotLightCount = 0;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 4);
+    CHECK(world.spotLights[0].position.x < body.transform.position.x);
+    CHECK(world.spotLights[1].position.x > body.transform.position.x);
+    tail = world.spotLights[2].color.x;
+    body.lamps = (CarLights){0, 0, 1, 0, 0};
+    world.spotLightCount = 0;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 2);
+    CHECK(fabsf(world.spotLights[0].color.x - 5 * tail) < 0.0001f);
+    for (unsigned course = 0; course < 4; ++course)
+    for (unsigned mesh = 0; mesh <= 15; mesh += 5) {
+        body.assetKey = 128 + course * 2;
+        body.mesh = mesh;
+        unsigned count = mesh == 15 ? 6 : 4;
+        body.lamps = (CarLights){1, 0.2f, 0, 1, 0};
+        world.spotLightCount = 0;
+        RenderCarSpotLights(&world);
+        CHECK(world.spotLightCount == count);
+        for (unsigned i = 0; i < count; ++i)
+            CHECK(i < 2 ? world.spotLights[i].direction.z > 0
+                        : world.spotLights[i].direction.z < 0);
+        body.lamps = (CarLights){0, 0, 1, 0, 0};
+        world.spotLightCount = 0;
+        RenderCarSpotLights(&world);
+        CHECK(world.spotLightCount == count - 2);
+        body.lamps = (CarLights){0};
+        world.spotLightCount = 0;
+        RenderCarSpotLights(&world);
+        CHECK(world.spotLightCount == 0);
+    }
+    body.assetKey = 129; /* Track texture assets are not car model banks. */
+    body.lamps = (CarLights){1, 0.2f, 1, 1, 0};
+    world.spotLightCount = 0;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 0);
+    for (unsigned bank = 88; bank <= 92; bank += 2)
+    for (unsigned mesh = 0; mesh <= 30; mesh += 5) {
+        body.assetKey = bank;
+        body.mesh = mesh;
+        world.spotLightCount = 0;
+        RenderCarSpotLights(&world);
+        CHECK(world.spotLightCount == 4);
+        CHECK(world.spotLights[0].position.x < body.transform.position.x);
+        CHECK(world.spotLights[1].position.x > body.transform.position.x);
+        CHECK(world.spotLights[2].direction.z < 0);
+        CHECK(world.spotLights[3].direction.z < 0);
+    }
+    body.assetKey = 94; /* Oval course has a different bank. */
+    body.mesh = 15; /* Prototype uses its fender lenses on the oval too. */
+    world.spotLightCount = 0;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 4);
+    {
+        const unsigned banks[] = {94, 104, 106, 108, 112, 114, 116, 120, 122, 124};
+        body.mesh = 0;
+        for (unsigned i = 0; i < sizeof(banks) / sizeof(*banks); ++i) {
+            body.assetKey = banks[i];
+            body.lamps = (CarLights){1, 0.2f, 0, 1, 0};
+            world.spotLightCount = 0;
+            RenderCarSpotLights(&world);
+            CHECK(world.spotLightCount == 4);
+            CHECK(world.spotLights[0].direction.z > 0);
+            CHECK(world.spotLights[2].direction.z < 0);
+            body.lamps = (CarLights){0, 0, 1, 0, 0};
+            world.spotLightCount = 0;
+            RenderCarSpotLights(&world);
+            CHECK(world.spotLightCount == 2);
+        }
+        body.lamps = (CarLights){1, 0.2f, 1, 1, 0};
+    }
+    for (unsigned bank = 96; bank <= 124; bank += 2)
+    for (unsigned mesh = 0; mesh <= 30; mesh += 5) {
+        if (bank == 102 || bank == 110 || bank == 118) continue;
+        const Lamp *first, *second;
+        body.mesh = mesh;
+        body.assetKey = 88;
+        CHECK(CarLamps(&body, &first) == 4);
+        body.assetKey = bank;
+        CHECK(CarLamps(&body, &second) == 4);
+        /* Shared geometry does not imply shared lamp artwork. */
+        CHECK(first != second);
+        CHECK(first[0].bounds[0] != second[0].bounds[0] ||
+              first[0].bounds[1] != second[0].bounds[1] ||
+              first[0].bounds[2] != second[0].bounds[2] ||
+              first[0].bounds[3] != second[0].bounds[3]);
+        world.spotLightCount = 0;
+        RenderCarSpotLights(&world);
+        CHECK(world.spotLightCount == 4);
+        body.component = 1;
+        CHECK(CarLamps(&body, &second) == 0);
+        CHECK(second == NULL);
+        body.component = 0;
+    }
+    {
+        const unsigned banks[][2] = {
+            {94, 120}, {102, 104}, {110, 104}, {118, 112}, {126, 120}, {134, 128},
+        };
+        for (unsigned i = 0; i < sizeof(banks) / sizeof(*banks); ++i)
+        for (unsigned mesh = 0; mesh < 35; ++mesh) {
+            const Lamp *oval, *road;
+            body.mesh = mesh;
+            body.assetKey = banks[i][0];
+            unsigned count = CarLamps(&body, &oval);
+            body.assetKey = banks[i][1];
+            CHECK(CarLamps(&body, &road) == count);
+            CHECK(oval == road);
+        }
+    }
+    body.mesh = 0;
+    body.assetSet = RAGE_RENDER_ASSET_MODEL_BANK;
+    body.assetKey = 24;
+    body.lamps = (CarLights){1, 0.2f, 0, 1, 0};
+    world.spotLightCount = 0;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 4);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(i < 2 ? world.spotLights[i].direction.z > 0.97f
+                    : world.spotLights[i].direction.z < -0.99f);
+        CHECK(i < 2 ? world.spotLights[i].position.z > body.transform.position.z
+                    : world.spotLights[i].position.z < body.transform.position.z);
+    }
+    body.lamps = (CarLights){0, 0, 1, 0, 0};
+    world.spotLightCount = 0;
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 2); /* Braking during the day lights only the rear. */
+    CHECK(world.spotLights[0].direction.z < -0.99f);
+    CHECK(world.spotLights[1].direction.z < -0.99f);
+    /* Every mapped player body has a pair at each end. Validate dark/off and
+     * day/braking separately so adding a model cannot silently omit one end. */
+    const unsigned models[] = {10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36,
+                               46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72};
+    body.assetSet = RAGE_RENDER_ASSET_MODEL_BANK;
+    for (unsigned m = 0; m < sizeof(models) / sizeof(*models); ++m) {
+        body.assetKey = models[m];
+        const Lamp *lamps;
+        unsigned count = CarLamps(&body, &lamps);
+        CHECK(count == 4);
+        for (unsigned i = 0; i < count; ++i) {
+            CHECK(lamps[i].bounds[0] < lamps[i].bounds[2]);
+            CHECK(lamps[i].bounds[1] < lamps[i].bounds[3]);
+            CHECK(isfinite(lamps[i].position.x) && isfinite(lamps[i].position.y));
+            CHECK(i < 2 ? lamps[i].position.z > 0 : lamps[i].position.z < 0);
+        }
+        body.lamps = (CarLights){1, 0.2f, 0, 1, 0};
+        world.spotLightCount = 0;
+        RenderCarSpotLights(&world);
+        CHECK(world.spotLightCount == 4);
+        body.lamps = (CarLights){0, 0, 1, 0, 0};
+        world.spotLightCount = 0;
+        RenderCarSpotLights(&world);
+        CHECK(world.spotLightCount == 2);
+        body.lamps = (CarLights){0};
+        world.spotLightCount = 0;
+        RenderCarSpotLights(&world);
+        CHECK(world.spotLightCount == 0);
+        body.component = 1;
+        CHECK(CarLamps(&body, &lamps) == 0 && lamps == NULL);
+        body.component = 0;
+        body.mesh = 1;
+        CHECK(CarLamps(&body, &lamps) == 0 && lamps == NULL);
+        body.mesh = 0;
+    }
+    RenderMeshInstance grid[12] = {0};
+    for (unsigned key = 38; key <= 44; key += 2) {
+        body.assetKey = key;
+        body.lamps = (CarLights){1, 0.2f, 1, 1, 0};
+        world.spotLightCount = 0;
+        RenderCarSpotLights(&world);
+        CHECK(world.spotLightCount == 6);
+        body.lamps = (CarLights){0, 0, 1, 0, 0};
+        world.spotLightCount = 0;
+        RenderCarSpotLights(&world);
+        CHECK(world.spotLightCount == 4);
+    }
+    RenderWorldInit(&world, grid, 12);
+    world.instanceCount = 12;
+    for (int i = 0; i < 12; ++i) {
+        grid[i].assetSet = RAGE_RENDER_ASSET_MODEL_BANK;
+        grid[i].assetKey = 38;
+        grid[i].entity = i;
+        grid[i].transform.scale = (Vec3){1, 1, 1};
+        grid[i].transform.position.x = i * 1000;
+        grid[i].lamps = (CarLights){1, 0.2f, 1, 1, 0};
+    }
+    RenderCarSpotLights(&world);
+    CHECK(world.spotLightCount == 72);
+    CHECK(world.spotLights[71].position.x > 10000);
+    return failures != 0;
+}

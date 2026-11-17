@@ -1,0 +1,263 @@
+#include "common.h"
+#include "game/asset.h"
+#include "game/fmv.h"
+#include "game/race.h"
+#include "game/state.h"
+
+#include <stdio.h>
+
+AssetRequestType g_AssetRequestType;
+s32 g_AssetLoadState;
+s32 g_AssetLoadFailed;
+s32 g_PendingCarModelIndex;
+u8 *g_AssetBase;
+u8 *g_AssetLoadCursor;
+u8 *g_AssetBlockPtr;
+size_t g_AssetBlockSize;
+u8 *g_AssetBlockPtr2;
+size_t g_AssetBlock2Size;
+u8 *g_ImageBlockBuffer;
+size_t g_ImageBlockSize;
+u8 *g_AssetSubBlockPtr;
+size_t g_AssetSubBlockSize;
+s32 g_CourseIndex;
+s32 g_GrandPrixClass;
+s16 g_SeriesSelection;
+GameCdLoadEntry g_StreamCdEntries[FMV_STREAM_COUNT];
+GameCdLoadEntry *g_StreamLoc;
+u32 g_StreamFrameCount;
+
+static s32 s_beginReturnScene;
+static s32 s_loadResult;
+static s32 s_loadAssetIndex;
+static void *s_loadDestination;
+static s32 s_installedAssetIndex;
+static s32 s_installedSeriesCamera;
+static s32 s_enableCdResult;
+static s32 s_resetLoaderCalls;
+static s32 s_loaderCall;
+static s32 s_loaderArgument;
+static s32 s_failures;
+
+enum {
+    LOADER_NONE,
+    LOADER_BOOT,
+    LOADER_SAVE,
+    LOADER_BGM,
+    LOADER_CAR_SELECT,
+    LOADER_CAR_MODEL,
+    LOADER_UPGRADED_CAR,
+    LOADER_OPTION,
+    LOADER_ROUND,
+    LOADER_RACE,
+    LOADER_GP_SCREEN,
+    LOADER_COURSE,
+    LOADER_CUSTOM_RIVAL_PREVIEW
+};
+
+void BeginFmv(s32 returnScene) { s_beginReturnScene = returnScene; }
+void ResetCdAudioState(void) {}
+void ResetAssetLoader(void) {
+    s_resetLoaderCalls++;
+    g_AssetRequestType = ASSET_REQUEST_IDLE;
+    g_AssetLoadState = 0;
+    g_AssetLoadFailed = 0;
+}
+s32 LoadAsset(s32 assetIndex, void *destination) {
+    s_loadAssetIndex = assetIndex;
+    s_loadDestination = destination;
+    return s_loadResult;
+}
+s32 InstallTrackRuntimeAssetPack(const void *data, size_t size, s32 assetIndex,
+                                 s32 useSeriesCamera) {
+    (void)data;
+    (void)size;
+    s_installedAssetIndex = assetIndex;
+    s_installedSeriesCamera = useSeriesCamera;
+    return 1;
+}
+s32 EnableCdAudioMode(void) { return s_enableCdResult; }
+
+void LoadBootAssets(void) { s_loaderCall = LOADER_BOOT; }
+void LoadSaveScreenAssets(void) { s_loaderCall = LOADER_SAVE; }
+void LoadSelectBgmAssets(void) { s_loaderCall = LOADER_BGM; }
+void LoadCarSelectAssets(void) { s_loaderCall = LOADER_CAR_SELECT; }
+void LoadPendingCarModelAsset(void) {
+    s_loaderCall = g_AssetRequestType == ASSET_REQUEST_UPGRADED_CAR_MODEL
+                       ? LOADER_UPGRADED_CAR
+                       : LOADER_CAR_MODEL;
+    s_loaderArgument = g_PendingCarModelIndex;
+}
+void LoadOptionScreenAssets(void) { s_loaderCall = LOADER_OPTION; }
+void LoadRoundAssets(void) { s_loaderCall = LOADER_ROUND; }
+void LoadRaceAssets(void) { s_loaderCall = LOADER_RACE; }
+void LoadGrandPrixScreen(void) { s_loaderCall = LOADER_GP_SCREEN; }
+void LoadCourseTextureAssets(void) { s_loaderCall = LOADER_COURSE; }
+void LoadCustomRivalPreviewAssets(void) {
+    s_loaderCall = LOADER_CUSTOM_RIVAL_PREVIEW;
+}
+
+static void Check(s32 condition, const char *label) {
+    if (!condition) {
+        printf("FAIL %s\n", label);
+        s_failures++;
+    }
+}
+
+static void TestFmvSelection(void) {
+    s32 i, series, classIndex;
+
+    for (i = 0; i < 11; i++) g_StreamCdEntries[i].size = (u32)(100 + i);
+
+    BeginIntroFmv(3);
+    Check(s_beginReturnScene == 3, "intro return scene");
+    Check(g_StreamLoc == &g_StreamCdEntries[0] && g_StreamFrameCount == 100,
+          "intro stream selection");
+
+    for (series = 0; series < 2; series++) {
+        for (classIndex = 0; classIndex < FMV_GRAND_PRIX_CLASS_COUNT;
+             classIndex++) {
+            s32 stream = (series == 0 ? FMV_STREAM_GRAND_PRIX_BASE
+                                       : FMV_STREAM_EXTRA_GRAND_PRIX_BASE) +
+                         classIndex;
+            g_SeriesSelection = (s16)series;
+            g_GrandPrixClass = classIndex;
+            BeginClassFmv(7 + series);
+            Check(s_beginReturnScene == 7 + series,
+                  "class FMV preserves its return scene");
+            Check(g_StreamLoc == &g_StreamCdEntries[stream] &&
+                      g_StreamFrameCount == (u32)(100 + stream),
+                  "every class promotion selects its own FMV stream");
+        }
+    }
+
+    g_SeriesSelection = 1;
+    g_GrandPrixClass = -4;
+    BeginClassFmv(8);
+    Check(g_StreamLoc == &g_StreamCdEntries[5],
+          "negative class clamps to the first class stream");
+    g_GrandPrixClass = 9;
+    BeginClassFmv(8);
+    Check(g_StreamLoc == &g_StreamCdEntries[8],
+          "high class clamps to the last class stream");
+
+    BeginEndingFmv(0x21);
+    Check(s_beginReturnScene == 0x21, "ending return scene");
+    Check(g_StreamLoc == &g_StreamCdEntries[10] && g_StreamFrameCount == 110,
+          "ending stream selection");
+}
+
+static void TestTrackDataLoad(void) {
+    u8 destination[64];
+    s32 expectedAsset = ASSET_TRACK_2ND_BASE + 3 * 8 + 2 * 2;
+
+    g_GrandPrixClass = 3;
+    g_CourseIndex = 2;
+    g_AssetLoadCursor = destination;
+    g_AssetLoadState = 1;
+    s_loadResult = 0;
+    LoadTrackDataAssets();
+    Check(g_AssetLoadState == 1, "pending track data holds phase");
+    Check(s_loadAssetIndex == expectedAsset &&
+              s_loadDestination == destination,
+          "track data asset request");
+
+    s_loadResult = 1;
+    LoadTrackDataAssets();
+    Check(g_AssetLoadState == 2 &&
+              s_installedAssetIndex == expectedAsset &&
+              s_installedSeriesCamera == 0,
+          "track data pack installation");
+
+    s_enableCdResult = 0;
+    LoadTrackDataAssets();
+    Check(g_AssetLoadState == 2, "pending CD mode holds track data phase");
+    s_enableCdResult = 1;
+    LoadTrackDataAssets();
+    Check(g_AssetLoadState == 0, "CD mode completes track data load");
+
+    g_AssetLoadState = 99;
+    g_AssetLoadFailed = 0;
+    LoadTrackDataAssets();
+    Check(g_AssetLoadState == 0 && g_AssetLoadFailed != 0,
+          "unknown track-data phase is rejected");
+    g_AssetLoadFailed = 0;
+    LoadTrackDataAssets();
+    Check(g_AssetLoadFailed == 0, "idle track-data loader is a no-op");
+}
+
+static void CheckDispatch(AssetRequestType request, s32 expectedLoader) {
+    g_AssetRequestType = request;
+    g_AssetLoadState = 1;
+    s_loaderCall = LOADER_NONE;
+    ServiceAssetLoad();
+    Check(s_loaderCall == expectedLoader, "asset request dispatch");
+}
+
+static void TestAssetDispatch(void) {
+    CheckDispatch(ASSET_REQUEST_BOOT, LOADER_BOOT);
+    CheckDispatch(ASSET_REQUEST_SAVE_SCREEN, LOADER_SAVE);
+    CheckDispatch(ASSET_REQUEST_SELECT_BGM, LOADER_BGM);
+    CheckDispatch(ASSET_REQUEST_CAR_SELECT, LOADER_CAR_SELECT);
+    g_PendingCarModelIndex = 12;
+    CheckDispatch(ASSET_REQUEST_CAR_MODEL, LOADER_CAR_MODEL);
+    Check(s_loaderArgument == 12, "car model dispatch argument");
+    g_PendingCarModelIndex = 13;
+    CheckDispatch(ASSET_REQUEST_UPGRADED_CAR_MODEL, LOADER_UPGRADED_CAR);
+    Check(s_loaderArgument == 13, "upgraded car dispatch argument");
+    CheckDispatch(ASSET_REQUEST_OPTION_SCREEN, LOADER_OPTION);
+    CheckDispatch(ASSET_REQUEST_ROUND_SCREEN, LOADER_ROUND);
+    CheckDispatch(ASSET_REQUEST_RACE, LOADER_RACE);
+    CheckDispatch(ASSET_REQUEST_GRAND_PRIX_SCREEN, LOADER_GP_SCREEN);
+    CheckDispatch(ASSET_REQUEST_COURSE_TEXTURES, LOADER_COURSE);
+    CheckDispatch(ASSET_REQUEST_CUSTOM_RIVAL_PREVIEW,
+                  LOADER_CUSTOM_RIVAL_PREVIEW);
+
+    s_resetLoaderCalls = 0;
+    g_AssetRequestType = ASSET_REQUEST_INVALID;
+    g_AssetLoadState = 1;
+    s_loaderCall = LOADER_NONE;
+    ServiceAssetLoad();
+    Check(s_loaderCall == LOADER_NONE && s_resetLoaderCalls == 1 &&
+              g_AssetLoadState == 0 && AssetLoadHasFailed(),
+          "invalid request rejects an inconsistent active loader");
+
+    g_AssetRequestType = ASSET_REQUEST_IDLE;
+    g_AssetLoadState = 1;
+    ServiceAssetLoad();
+    Check(s_loaderCall == LOADER_NONE && s_resetLoaderCalls == 2 &&
+              g_AssetLoadState == 0 && AssetLoadHasFailed(),
+          "idle request rejects an inconsistent active loader");
+
+    g_AssetRequestType = (AssetRequestType)0x7FFF;
+    g_AssetLoadState = 1;
+    ServiceAssetLoad();
+    Check(s_loaderCall == LOADER_NONE && s_resetLoaderCalls == 3 &&
+              g_AssetRequestType == ASSET_REQUEST_IDLE &&
+              g_AssetLoadState == 0 && AssetLoadHasFailed(),
+          "unknown request rejects an inconsistent active loader");
+
+    g_AssetRequestType = ASSET_REQUEST_TRACK_DATA;
+    g_AssetLoadState = 1;
+    g_GrandPrixClass = 1;
+    g_CourseIndex = 3;
+    s_loadResult = 0;
+    ServiceAssetLoad();
+    Check(s_loadAssetIndex == ASSET_TRACK_2ND_BASE + 14,
+          "track data request dispatch");
+
+    g_AssetLoadState = 0;
+    s_loaderCall = LOADER_NONE;
+    ServiceAssetLoad();
+    Check(s_loaderCall == LOADER_NONE, "idle loader dispatch does nothing");
+}
+
+int main(void) {
+    TestFmvSelection();
+    TestTrackDataLoad();
+    TestAssetDispatch();
+
+    if (s_failures != 0) return 1;
+    puts("FMV and asset requests select their exact streams and loaders");
+    return 0;
+}

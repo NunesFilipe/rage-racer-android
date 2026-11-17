@@ -1,0 +1,349 @@
+/*
+ * The prize screen counts money into the save block, and the save block is the
+ * one piece of a race that outlives it.
+ *
+ * verify_grand_prix_results.py already drives a whole race into this screen,
+ * but it only watches the scene numbers go by; nothing checked that the money
+ * arithmetic lands. The screen is a state machine over globals, so it can be
+ * stepped a frame at a time here and asked what the player was actually paid.
+ */
+
+#include "common.h"
+#include "game/player_car_internal.h"
+#include "game/race.h"
+#include "game/race_internal.h"
+#include "game/menu.h"
+#include "game/sound.h"
+#include "game/state.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static PrizeScreen s_screen;
+
+/* The screen's own state. */
+s32 g_ClassCompleted;
+s32 g_ClassPromoted;
+s32 g_ClassResultPlace;
+s32 g_CourseIndex;
+s32 g_FrameSyncThreshold;
+s32 g_GrandPrixClass;
+s32 g_SeriesCleared;
+s32 g_SceneId;
+GameRaceProgress *g_RaceProgress;
+PlayerCarRuntime g_PlayerCar;
+RagePrizeMoneyStorage g_PrizeMoneyState;
+s32 g_PromotionBonusTable[PROMOTION_BONUS_COUNT];
+u16 g_PadPressed;
+u16 g_PadHeld;
+
+/* The screen only draws and plays cues through these; what it draws is not
+ * this test's subject, but whether it asked to is. */
+static int s_bgmRequested;
+static int s_classAdvanced;
+static int s_fanfareTicks;
+static int s_fanfareFrames;
+static int s_drawClassBanner;
+
+void DrawFullscreenFadeTile(s32 step, s32 clut) { (void)step; (void)clut; }
+void DrawGrandPrixIntro(s32 drawClassBanner) {
+    s_drawClassBanner = drawClassBanner;
+}
+void DrawPrizeMoneyPanel(s32 step, s32 prize, s32 bonus) {
+    (void)step; (void)prize; (void)bonus;
+}
+void DrawRaceTimePanel(s32 step) { (void)step; }
+void PlaySoundCue(s32 cue) { (void)cue; }
+s32 RequestSelectBgmAssets(void) {
+    s_bgmRequested++;
+    return 0;
+}
+void AdvanceGrandPrixClass(void) { s_classAdvanced++; }
+s32 TickClassClearFanfare(void) {
+    s_fanfareTicks++;
+    if (s_fanfareFrames != 0) {
+        s_fanfareFrames--;
+    }
+    return s_fanfareFrames;
+}
+void StartClassClearFanfare(void) {}
+
+static GameRaceProgress s_progress;
+static int s_failures;
+
+static void Check(int condition, const char *what, s32 got, s32 wanted) {
+    if (condition) return;
+    printf("FAIL %s: got %d, expected %d\n", what, got, wanted);
+    s_failures++;
+}
+
+static void Reset(s32 prize, s32 bonus) {
+    memset(&s_progress, 0, sizeof(s_progress));
+    g_RaceProgress = &s_progress;
+    s_screen.state = PRIZE_SCREEN_STATE_INTRO_FADE_IN;
+    s_screen.prize = prize;
+    s_screen.bonus = bonus;
+    s_screen.prizeStep = 100;
+    s_screen.bonusStep = 50;
+    g_ClassCompleted = 0;
+    g_SeriesCleared = 0;
+    s_screen.timer = 0x100;
+    g_PadPressed = 0;
+    g_PadHeld = 0;
+    s_bgmRequested = 0;
+    s_classAdvanced = 0;
+    s_fanfareTicks = 0;
+    s_fanfareFrames = 0;
+    s_drawClassBanner = -1;
+}
+
+/*
+ * Run the screen until it stops changing state or the budget runs out, holding
+ * confirm as told and pressing it on the first frame of each new state so the
+ * waits move on.
+ */
+static int RunToEnd(int hold, int budget) {
+    PrizeScreenState previous = s_screen.state;
+    int frames = 0;
+
+    while (frames < budget) {
+        g_PadHeld = hold ? PAD_CONFIRM : 0;
+        g_PadPressed = (s_screen.state != previous || frames == 0)
+                           ? PAD_CONFIRM
+                           : 0;
+        previous = s_screen.state;
+        UpdatePrizeMoneyScreenState(&s_screen);
+        frames++;
+        if (s_screen.state == PRIZE_SCREEN_STATE_FADE_OUT) {
+            break;
+        }
+    }
+    return frames;
+}
+
+int main(void) {
+    /* The opening panels retain the original frame-exact slide sequence. */
+    {
+        int i;
+
+        Reset(1000, 0);
+        for (i = 0; i < 31; i++) {
+            UpdatePrizeMoneyScreenState(&s_screen);
+        }
+        Check(s_screen.state == PRIZE_SCREEN_STATE_INTRO_FADE_IN,
+              "intro fade lasts 32 frames", s_screen.state,
+              PRIZE_SCREEN_STATE_INTRO_FADE_IN);
+        UpdatePrizeMoneyScreenState(&s_screen);
+        Check(s_screen.state == PRIZE_SCREEN_STATE_WAIT_FOR_INTRO_CONFIRM,
+              "intro fade reaches its wait state", s_screen.state,
+              PRIZE_SCREEN_STATE_WAIT_FOR_INTRO_CONFIRM);
+
+        g_PadPressed = PAD_CONFIRM;
+        UpdatePrizeMoneyScreenState(&s_screen);
+        g_PadPressed = 0;
+        for (i = 0; i < 16; i++) {
+            UpdatePrizeMoneyScreenState(&s_screen);
+        }
+        Check(s_screen.state == PRIZE_SCREEN_STATE_HIDE_RACE_TIME,
+              "race panel remains through offset 128", s_screen.state,
+              PRIZE_SCREEN_STATE_HIDE_RACE_TIME);
+        UpdatePrizeMoneyScreenState(&s_screen);
+        Check(s_screen.state == PRIZE_SCREEN_STATE_SHOW_PRIZE_PANEL,
+              "race panel leaves after offset 128", s_screen.state,
+              PRIZE_SCREEN_STATE_SHOW_PRIZE_PANEL);
+        for (i = 0; i < 16; i++) {
+            UpdatePrizeMoneyScreenState(&s_screen);
+        }
+        Check(s_screen.state == PRIZE_SCREEN_STATE_SHOW_PRIZE_PANEL,
+              "prize panel takes 17 frames to slide in", s_screen.state,
+              PRIZE_SCREEN_STATE_SHOW_PRIZE_PANEL);
+        UpdatePrizeMoneyScreenState(&s_screen);
+        Check(s_screen.state == PRIZE_SCREEN_STATE_COUNT_PRIZE,
+              "prize panel reaches the counting state", s_screen.state,
+              PRIZE_SCREEN_STATE_COUNT_PRIZE);
+        Check(s_drawClassBanner == 0, "intro hides the class banner",
+              s_drawClassBanner, 0);
+    }
+
+    /* Everything owed reaches the player, prize first and then the bonus. */
+    Reset(1000, 400);
+    RunToEnd(0, 4000);
+    Check(s_progress.money == 1400, "prize and bonus both paid",
+          s_progress.money, 1400);
+    Check(s_screen.prize == 0, "nothing left owed on the prize", s_screen.prize,
+          0);
+    Check(s_screen.bonus == 0, "nothing left owed on the bonus",
+          s_screen.bonus, 0);
+    Check(s_drawClassBanner == 1, "bonus phase shows the class banner",
+          s_drawClassBanner, 1);
+    Check(s_screen.state == PRIZE_SCREEN_STATE_FADE_OUT,
+          "screen finishes on the fade", s_screen.state,
+          PRIZE_SCREEN_STATE_FADE_OUT);
+
+    /* Paying a prize cannot overflow the save's advertised money limit. */
+    Reset(1000, 400);
+    s_progress.money = RACE_MAX_PRIZE_MONEY - 50;
+    RunToEnd(0, 4000);
+    Check(s_progress.money == RACE_MAX_PRIZE_MONEY,
+          "prize money saturates at the save limit", s_progress.money,
+          RACE_MAX_PRIZE_MONEY);
+    Check(s_screen.prize == 0 && s_screen.bonus == 0,
+          "capped money still finishes both counters", s_screen.prize,
+          0);
+
+    /* The counter waits out the panel before it starts, and the wait is
+     * counted in frames rather than eyeballed. */
+    {
+        int i;
+
+        Reset(1000, 0);
+        s_screen.state = PRIZE_SCREEN_STATE_COUNT_PRIZE;
+        s_screen.timer = 0;
+        for (i = 0; i < 120; i++) {
+            UpdatePrizeMoneyScreenState(&s_screen);
+        }
+        Check(s_progress.money == 0, "nothing is paid during the wait",
+              s_progress.money, 0);
+        UpdatePrizeMoneyScreenState(&s_screen);
+        Check(s_progress.money == 100, "the first step lands on frame 121",
+              s_progress.money, 100);
+    }
+
+    /* An amount that is not a whole number of steps still pays out exactly,
+     * rather than overshooting on the last one. */
+    Reset(1050, 425);
+    RunToEnd(0, 4000);
+    Check(s_progress.money == 1475, "part of a step still pays exactly",
+          s_progress.money, 1475);
+
+    /* No bonus at all skips straight past the bonus states. */
+    Reset(300, 0);
+    RunToEnd(0, 4000);
+    Check(s_progress.money == 300, "prize alone", s_progress.money,
+          300);
+    Check(s_classAdvanced == 0, "the class only advances after the fade",
+          s_classAdvanced, 0);
+
+    /* Nothing owed at all still walks the screen to its end. */
+    Reset(0, 0);
+    RunToEnd(0, 4000);
+    Check(s_progress.money == 0, "nothing owed pays nothing",
+          s_progress.money, 0);
+    Check(s_screen.state == PRIZE_SCREEN_STATE_FADE_OUT,
+          "nothing owed still reaches the fade", s_screen.state,
+          PRIZE_SCREEN_STATE_FADE_OUT);
+
+    /* Holding confirm counts four times as fast and pays the same total. */
+    {
+        int slow, fast;
+
+        Reset(4000, 2000);
+        slow = RunToEnd(0, 20000);
+        Check(s_progress.money == 6000, "unhurried total",
+              s_progress.money, 6000);
+
+        Reset(4000, 2000);
+        fast = RunToEnd(1, 20000);
+        Check(s_progress.money == 6000, "hurried total",
+              s_progress.money, 6000);
+        if (fast >= slow) {
+            printf("FAIL holding confirm did not speed the count up: "
+                   "%d frames held against %d\n", fast, slow);
+            s_failures++;
+        }
+    }
+
+    /* The fanfare has to finish before the screen will leave, however hard
+     * the player presses. */
+    Reset(0, 0);
+    s_screen.state = PRIZE_SCREEN_STATE_WAIT_TO_FINISH;
+    s_fanfareFrames = 101;
+    {
+        int i;
+        for (i = 0; i < 100; i++) {
+            g_PadPressed = PAD_CONFIRM;
+            UpdatePrizeMoneyScreenState(&s_screen);
+        }
+    }
+    Check(s_screen.state == PRIZE_SCREEN_STATE_WAIT_TO_FINISH,
+          "the fanfare holds the screen", s_screen.state,
+          PRIZE_SCREEN_STATE_WAIT_TO_FINISH);
+    Check(s_fanfareTicks == 100, "and keeps being ticked", s_fanfareTicks, 100);
+
+    /* The fanfare also runs down while the player waits without pressing,
+     * so a single confirm press afterwards is enough to leave. */
+    Reset(0, 0);
+    s_screen.state = PRIZE_SCREEN_STATE_WAIT_TO_FINISH;
+    s_fanfareFrames = 50;
+    {
+        int i;
+        for (i = 0; i < 50; i++) {
+            g_PadPressed = 0;
+            UpdatePrizeMoneyScreenState(&s_screen);
+        }
+    }
+    Check(s_fanfareTicks == 50, "the fanfare ticks without input",
+          s_fanfareTicks, 50);
+    Check(s_screen.state == PRIZE_SCREEN_STATE_WAIT_TO_FINISH,
+          "and waiting alone does not leave", s_screen.state,
+          PRIZE_SCREEN_STATE_WAIT_TO_FINISH);
+    g_PadPressed = PAD_CONFIRM;
+    UpdatePrizeMoneyScreenState(&s_screen);
+    Check(s_screen.state == PRIZE_SCREEN_STATE_FADE_OUT,
+          "one press leaves once the fanfare is over", s_screen.state,
+          PRIZE_SCREEN_STATE_FADE_OUT);
+
+    /* Leaving asks for the menu music back only when the class is unfinished. */
+    Reset(0, 0);
+    s_screen.state = PRIZE_SCREEN_STATE_WAIT_TO_FINISH;
+    g_PadPressed = PAD_CONFIRM;
+    UpdatePrizeMoneyScreenState(&s_screen);
+    Check(s_bgmRequested == 1, "unfinished class asks for the menu music",
+          s_bgmRequested, 1);
+
+    Reset(0, 0);
+    s_screen.state = PRIZE_SCREEN_STATE_WAIT_TO_FINISH;
+    g_ClassCompleted = 1;
+    g_PadPressed = PAD_CONFIRM;
+    UpdatePrizeMoneyScreenState(&s_screen);
+    Check(s_bgmRequested == 0, "a finished class keeps its own music",
+          s_bgmRequested, 0);
+
+    /* The fade runs slower once the whole series is done, and hands over at
+     * the end either way. */
+    {
+        int i;
+
+        Reset(0, 0);
+        s_screen.state = PRIZE_SCREEN_STATE_FADE_OUT;
+        s_screen.timer = 0;
+        for (i = 0; i < 127; i++) {
+            UpdatePrizeMoneyScreenState(&s_screen);
+        }
+        Check(s_classAdvanced == 0, "normal fade waits 128 frames",
+              s_classAdvanced, 0);
+        UpdatePrizeMoneyScreenState(&s_screen);
+        Check(s_classAdvanced == 1, "normal fade advances on frame 128",
+              s_classAdvanced, 1);
+
+        Reset(0, 0);
+        s_screen.state = PRIZE_SCREEN_STATE_FADE_OUT;
+        g_SeriesCleared = 1;
+        s_screen.timer = 0;
+        for (i = 0; i < 255; i++) {
+            UpdatePrizeMoneyScreenState(&s_screen);
+        }
+        Check(s_classAdvanced == 0, "series fade waits 256 frames",
+              s_classAdvanced, 0);
+        UpdatePrizeMoneyScreenState(&s_screen);
+        Check(s_classAdvanced == 1, "series fade advances on frame 256",
+              s_classAdvanced, 1);
+    }
+
+    if (s_failures != 0) {
+        printf("%d prize screen checks failed\n", s_failures);
+        return 1;
+    }
+    printf("the prize screen pays out everything it owes\n");
+    return 0;
+}

@@ -1,0 +1,937 @@
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "game/player_car_internal.h"
+#include "game/input_internal.h"
+#include "game/frontend_internal.h"
+#include "game/menu.h"
+#include "game/race.h"
+#include "game/race_internal.h"
+#include "game/render_internal.h"
+#include "game/random.h"
+#include "game/save_internal.h"
+#include "game/scene_runtime.h"
+#include "game/track_internal.h"
+#include "runtime_config.h"
+#include "scenario_control.h"
+#include "modern/modern_renderer.h"
+
+typedef struct RageSmokeInput {
+    int firstFrame;
+    int lastFrame;
+    unsigned short buttons;
+    int held;
+} RageSmokeInput;
+
+static int SmokeFrameListContains(const char *list, int frame) {
+    const char *cursor = list;
+
+    while (cursor != NULL && *cursor != '\0') {
+        char *end;
+        long value;
+
+        errno = 0;
+        value = strtol(cursor, &end, 10);
+        if (errno == ERANGE || end == cursor || value < INT_MIN ||
+            value > INT_MAX) {
+            return 0;
+        }
+        if (value == frame) return 1;
+        if (*end == '\0') return 0;
+        if (*end != ',') return 0;
+        cursor = end + 1;
+    }
+    return 0;
+}
+
+static uint32_t SmokeHashAppendWords(uint32_t hash, const u32 *words,
+                                     size_t count) {
+    size_t index;
+
+    for (index = 0; index < count; index++) {
+        u32 value = words[index];
+        int byteIndex;
+        for (byteIndex = 0; byteIndex < 4; byteIndex++) {
+            hash ^= (value >> (byteIndex * 8)) & 0xff;
+            hash *= 16777619u;
+        }
+    }
+    return hash;
+}
+
+static uint32_t SmokeHashWords(const u32 *words, size_t count) {
+    return SmokeHashAppendWords(2166136261u, words, count);
+}
+
+static uint32_t SmokeHashBytes(const void *data, size_t size) {
+    const unsigned char *bytes = data;
+    uint32_t hash = 2166136261u;
+    size_t index;
+    for (index = 0; index < size; index++) {
+        hash ^= bytes[index];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static uint32_t SmokeHashCarRenderState(const GameCarRuntime *cars,
+                                            size_t count) {
+    uint32_t hash = 2166136261u;
+    size_t carIndex;
+    for (carIndex = 0; carIndex < count; carIndex++) {
+        const GameCarRuntime *car = &cars[carIndex];
+        const u32 values[] = {
+            (u32)car->x, (u32)car->y, (u32)car->z,
+            (u32)car->bodyPitch, (u32)car->bodyYaw, (u32)car->bodyRoll,
+            (u32)car->steeringAngle, (u32)car->wheelRotation,
+            (u32)car->modelPitch, (u32)car->modelYaw, (u32)car->modelRoll,
+            (u32)car->modelY, (u32)car->bodyRollVelocity,
+            (u32)car->trackProgress, (u32)car->renderDepth,
+            (u32)(u16)car->activeFlag, (u32)(u16)car->modelIndex,
+            (u32)car->aiEnabled
+        };
+        hash = SmokeHashAppendWords(
+            hash, values, sizeof(values) / sizeof(values[0]));
+    }
+    return hash;
+}
+
+static uint32_t SmokeHashOneCarRenderState(const GameCarRuntime *car) {
+    return SmokeHashCarRenderState(car, 1);
+}
+
+static uint32_t SmokeHashPlayerRenderState(const PlayerCarRuntime *car) {
+    const GameCarRuntime *renderObject =
+        (const GameCarRuntime *)(const void *)car;
+    const u32 values[] = {
+        (u32)car->x, (u32)car->y, (u32)car->z,
+        (u32)car->bodyPitch, (u32)car->bodyYaw, (u32)car->bodyRoll,
+        (u32)car->steeringAngle, (u32)car->wheelRotation,
+        (u32)car->modelPitch, (u32)car->modelYaw, (u32)car->modelRoll,
+        (u32)car->modelY, (u32)car->bodyRollVelocity,
+        (u32)car->trackProgress, (u32)renderObject->renderDepth,
+        (u32)(u16)car->activeFlag, (u32)(u16)car->modelIndex
+    };
+    return SmokeHashWords(values, sizeof(values) / sizeof(values[0]));
+}
+
+static int SmokeCountDrawableCars(const GameCarRuntime *cars,
+                                      size_t count) {
+    int drawable = 0;
+    size_t index;
+    for (index = 0; index < count; index++) {
+        if (cars[index].activeFlag != -1 && cars[index].aiEnabled == 1) {
+            drawable++;
+        }
+    }
+    return drawable;
+}
+
+static uint32_t SmokeHashVisibleList(const VisibleTerrainCell *entries) {
+    uint32_t hash = 2166136261u;
+    size_t entryIndex;
+    for (entryIndex = 0; entryIndex < 64; entryIndex++) {
+        u32 words[4];
+        words[0] = entries[entryIndex].cellIndex == -1
+                       ? 0
+                       : (u32)entries[entryIndex].x;
+        words[1] = entries[entryIndex].cellIndex == -1
+                       ? 0
+                       : (u32)entries[entryIndex].y;
+        words[2] = entries[entryIndex].cellIndex == -1
+                       ? 0
+                       : (u32)entries[entryIndex].z;
+        words[3] = (u32)entries[entryIndex].cellIndex;
+        hash = SmokeHashAppendWords(
+            hash, words, sizeof(words) / sizeof(words[0]));
+    }
+    return hash;
+}
+
+typedef struct RageSmokeStateInput {
+    int scene;
+    int timer;
+    int phase;
+    int hasPhase;
+    unsigned short buttons;
+    int armed;
+    int fired;
+} RageSmokeStateInput;
+
+enum { RAGE_SMOKE_INPUT_CAPACITY = 256 };
+static RageSmokeInput g_SmokeInputs[RAGE_SMOKE_INPUT_CAPACITY];
+static int g_SmokeInputCount;
+static int g_SmokeFrameLimit;
+static int g_SmokeFinishFrame;
+static int g_SmokePriorCourseWinsSeeded;
+static int g_SmokeAutoConfirmFrame;
+static int g_SmokeStopScene;
+static int g_SmokeStopSceneTimer;
+static int g_SmokeCaptureTimerStride;
+static int g_SmokeCaptureTimerMin;
+static int g_SmokeCaptureTimerMax;
+static int g_SmokeCaptureScene;
+static const char *g_SmokeCaptureDirectory;
+static FILE *g_SmokeCaptureManifest;
+
+static void SmokeWriteVisibleCells(const char *captureDirectory,
+                                   int frameNumber) {
+    char path[1024];
+    FILE *file;
+    int index;
+    if (!RuntimeConfigEnabled("capture.visible_cells")) return;
+    if (snprintf(path, sizeof(path), "%s/visible-cells.log", captureDirectory) >=
+        (int)sizeof(path)) return;
+    file = fopen(path, "a");
+    if (file == NULL) return;
+    fprintf(file, "visible-frame frame=%d scene=%d timer=%d\n",
+            frameNumber, g_SceneId, g_SceneTimer);
+    for (index = 0; index < 64; index++) {
+        const VisibleTerrainCell *mainEntry = &g_MainVisibleCellList[index];
+        const VisibleTerrainCell *mirrorEntry =
+            &g_MirrorVisibleCellList[index];
+        fprintf(file, "visible-cell %d=%d,%d,%d,%d\n", index,
+                mainEntry->x, mainEntry->y, mainEntry->z,
+                mainEntry->cellIndex);
+        fprintf(file, "mirror-cell %d=%d,%d,%d,%d\n", index,
+                mirrorEntry->x, mirrorEntry->y, mirrorEntry->z,
+                mirrorEntry->cellIndex);
+    }
+    for (index = 0; index < 32; index++) {
+        fprintf(file, "visible-mask %d=%08x\n", index,
+                (unsigned)g_MainVisibleCellMask[index]);
+        fprintf(file, "mirror-mask %d=%08x\n", index,
+                (unsigned)g_MirrorVisibleCellMask[index]);
+    }
+    fclose(file);
+}
+static int g_SmokeHasStopScene;
+static int g_SmokeHasStopSceneTimer;
+static int g_SmokeHasCaptureTimerMin;
+static int g_SmokeHasCaptureTimerMax;
+static int g_SmokeHasCaptureScene;
+static int g_SmokeInitialized;
+static int g_SmokeRawPadPath;
+static int g_SmokeCaptureAllPhases;
+static RageSmokeStateInput g_SmokeStateInputs[32];
+static int g_SmokeRandomSyncEnabled;
+static int g_SmokeRandomSyncArmed;
+static int g_SmokeRandomSyncFired;
+static int g_SmokeRandomSyncScene;
+static int g_SmokeRandomSyncTimer;
+static unsigned long g_SmokeRandomSyncSeed;
+static int g_SmokeRandomSyncVariant;
+static int g_SmokeRandomSyncPresentationVariant;
+static int g_SmokeRandomSyncHasVariants;
+static int g_SmokeRandomSyncEachFrame;
+static void SmokeInitialize(void);
+
+void PortSmokeBeforeSceneHandler(void) {
+    if (!g_SmokeInitialized) {
+        g_SmokeInitialized = 1;
+        SmokeInitialize();
+    }
+    if (!g_SmokeRandomSyncEnabled ||
+        (g_SmokeRandomSyncFired && !g_SmokeRandomSyncEachFrame)) return;
+    if (g_SceneId == g_SmokeRandomSyncScene &&
+        g_SceneTimer <= g_SmokeRandomSyncTimer) {
+        g_SmokeRandomSyncArmed = 1;
+    }
+    if (g_SmokeRandomSyncArmed && g_SceneId == g_SmokeRandomSyncScene &&
+        g_SceneTimer >= g_SmokeRandomSyncTimer) {
+        g_RandomSeed = (unsigned int)g_SmokeRandomSyncSeed;
+        if (g_SmokeRandomSyncHasVariants) {
+            g_SceneryAnimation.raceVariant = (s16)g_SmokeRandomSyncVariant;
+            g_SceneryAnimation.presentationVariant =
+                (s16)g_SmokeRandomSyncPresentationVariant;
+        }
+        g_SmokeRandomSyncFired = 1;
+        if (!g_SmokeRandomSyncEachFrame ||
+            g_SceneTimer == g_SmokeRandomSyncTimer) fprintf(stderr,
+                "random sync before-scene frame=%d scene=%d timer=%d "
+                "seed=%08x variants=%d,%d\n",
+                g_FrameCounter, g_SceneId, g_SceneTimer, g_RandomSeed,
+                g_SceneryAnimation.raceVariant,
+                g_SceneryAnimation.presentationVariant);
+    }
+}
+static int g_SmokeStateInputCount;
+
+extern int g_SceneId;
+extern int g_TrackLength;
+extern int g_SkyRowBase;
+extern int g_IsEnvironmentMode4;
+extern unsigned int g_RandomSeed;
+extern int g_AnimTimer;
+extern s32 g_MirrorPanelY;
+int WriteCapturedFrame(const char *path);
+void UpdatePadState(void);
+
+static unsigned short SmokeButton(const char *name) {
+    if (strcmp(name, "L2") == 0) return 0x1;
+    if (strcmp(name, "R2") == 0) return 0x2;
+    if (strcmp(name, "L1") == 0) return 0x4;
+    if (strcmp(name, "R1") == 0) return 0x8;
+    if (strcmp(name, "TRIANGLE") == 0) return 0x10;
+    if (strcmp(name, "START") == 0) return 0x800;
+    if (strcmp(name, "CROSS") == 0 || strcmp(name, "CONFIRM") == 0) return 0x40;
+    if (strcmp(name, "CIRCLE") == 0 || strcmp(name, "CANCEL") == 0) return 0x20;
+    if (strcmp(name, "SQUARE") == 0) return 0x80;
+    if (strcmp(name, "SELECT") == 0) return 0x100;
+    if (strcmp(name, "L3") == 0) return 0x200;
+    if (strcmp(name, "R3") == 0) return 0x400;
+    if (strcmp(name, "UP") == 0) return 0x1000;
+    if (strcmp(name, "RIGHT") == 0) return 0x2000;
+    if (strcmp(name, "DOWN") == 0) return 0x4000;
+    if (strcmp(name, "LEFT") == 0) return 0x8000;
+    return 0;
+}
+
+static int SmokeParseRandomSync(const char *text) {
+    char *copy;
+    char *at;
+    char *equals;
+    char *firstColon;
+    char *secondColon = NULL;
+    char *seedText;
+    char *seedEnd;
+    unsigned long seed;
+    int seedValid;
+    int scene;
+    int timer;
+    int variant = 0;
+    int presentationVariant = 0;
+    int valid;
+
+    if (text == NULL || text[0] == '\0') return 0;
+    copy = strdup(text);
+    if (copy == NULL) return 0;
+    at = strchr(copy, '@');
+    equals = at != NULL ? strchr(at + 1, '=') : NULL;
+    if (at == NULL || equals == NULL) {
+        free(copy);
+        return 0;
+    }
+    *at = '\0';
+    *equals = '\0';
+    firstColon = strchr(equals + 1, ':');
+    if (firstColon != NULL) {
+        *firstColon = '\0';
+        secondColon = strchr(firstColon + 1, ':');
+        if (secondColon != NULL) *secondColon = '\0';
+    }
+
+    seedText = equals + 1;
+    while (isspace((unsigned char)*seedText)) seedText++;
+    errno = 0;
+    seed = strtoul(seedText, &seedEnd, 0);
+    seedValid = errno != ERANGE && seedEnd != seedText && *seedEnd == '\0' &&
+                *seedText != '-' && seed <= UINT32_MAX;
+    valid = RuntimeParseInt(copy, 0, 0, INT_MAX, &scene) &&
+            RuntimeParseInt(at + 1, 0, 0, INT_MAX, &timer) &&
+            seedValid;
+    if (firstColon != NULL) {
+        valid = valid && secondColon != NULL &&
+                RuntimeParseInt(firstColon + 1, 0, SHRT_MIN, SHRT_MAX,
+                                &variant) &&
+                RuntimeParseInt(secondColon + 1, 0, SHRT_MIN, SHRT_MAX,
+                                &presentationVariant);
+    }
+    if (valid) {
+        g_SmokeRandomSyncScene = scene;
+        g_SmokeRandomSyncTimer = timer;
+        g_SmokeRandomSyncSeed = seed;
+        g_SmokeRandomSyncVariant = variant;
+        g_SmokeRandomSyncPresentationVariant = presentationVariant;
+        g_SmokeRandomSyncHasVariants = firstColon != NULL;
+    }
+    free(copy);
+    return valid;
+}
+
+static void SmokeInitialize(void) {
+    const char *script = RuntimeConfigGet("input.raw_script");
+    const char *stopScene = RuntimeConfigGet("stop.scene");
+    const char *stopTimer = RuntimeConfigGet("stop.timer");
+    const char *captureDirectory = RuntimeConfigGet("capture.directory");
+    const char *captureMin = RuntimeConfigGet("capture.timer_min");
+    const char *captureMax = RuntimeConfigGet("capture.timer_max");
+    const char *captureScene = RuntimeConfigGet("capture.scene");
+    const char *stateScript = RuntimeConfigGet("input.state_script");
+    const char *randomSync = RuntimeConfigGet("sync.random");
+    char *copy;
+    char *token;
+
+    g_SmokeFrameLimit = RuntimeConfigInt("run.frames", 0, 0, INT_MAX);
+    g_SmokeFinishFrame =
+        RuntimeConfigInt("hooks.finish_frame", 0, 0, INT_MAX);
+    g_SmokeAutoConfirmFrame =
+        RuntimeConfigInt("hooks.auto_confirm_frame", 0, 0, INT_MAX);
+    g_SmokeHasStopScene =
+        RuntimeParseInt(stopScene, 0, 0, INT_MAX, &g_SmokeStopScene);
+    g_SmokeHasStopSceneTimer =
+        RuntimeParseInt(stopTimer, 0, 0, INT_MAX, &g_SmokeStopSceneTimer);
+    g_SmokeCaptureDirectory = captureDirectory;
+    g_SmokeCaptureTimerStride = RuntimeConfigInt(
+        "capture.timer_stride", 0, 0, INT_MAX);
+    g_SmokeHasCaptureTimerMin = RuntimeParseInt(
+        captureMin, 0, 0, INT_MAX, &g_SmokeCaptureTimerMin);
+    g_SmokeHasCaptureTimerMax = RuntimeParseInt(
+        captureMax, 0, 0, INT_MAX, &g_SmokeCaptureTimerMax);
+    g_SmokeHasCaptureScene = RuntimeParseInt(
+        captureScene, 0, 0, INT_MAX, &g_SmokeCaptureScene);
+    g_SmokeCaptureAllPhases = RuntimeConfigEnabled("capture.all_phases");
+    g_SmokeRandomSyncEachFrame = RuntimeConfigEnabled("sync.random_each_frame");
+    if (randomSync != NULL && randomSync[0] != '\0') {
+        g_SmokeRandomSyncEnabled = SmokeParseRandomSync(randomSync);
+        if (!g_SmokeRandomSyncEnabled) {
+            fprintf(stderr,
+                    "RAGE_PORT_SYNC_RANDOM must be scene@timer=seed[:variant:variant2]\n");
+        }
+    }
+    if (g_SmokeCaptureDirectory != NULL &&
+        g_SmokeCaptureDirectory[0] != '\0' &&
+        g_SmokeCaptureTimerStride > 0) {
+        char manifestPath[1024];
+        int length = snprintf(manifestPath, sizeof(manifestPath),
+                              "%s/capture-manifest.csv",
+                              g_SmokeCaptureDirectory);
+        if (length > 0 && (size_t)length < sizeof(manifestPath)) {
+            g_SmokeCaptureManifest = fopen(manifestPath, "w");
+            if (g_SmokeCaptureManifest != NULL) {
+                fputs("filename,capture_surface,frame,scene,timer,x,z,speed,progress,lap," \
+                      "body_yaw,body_pitch,body_roll,track_lateral," \
+                      "model_yaw,mirror_y,view_x,view_y,view_z," \
+                      "view_angle_x,view_angle_y,view_angle_z," \
+                      "proj_m00,proj_m01,proj_m02,proj_m10,proj_m11," \
+                      "proj_m12,proj_m20,proj_m21,proj_m22," \
+                      "proj_x0,proj_y0,proj_x1,proj_y1,proj_order," \
+                      "mirror_m00,mirror_m01,mirror_m02,mirror_m10,mirror_m11," \
+                      "mirror_m12,mirror_m20,mirror_m21,mirror_m22," \
+                      "main_visible_hash,mirror_visible_hash," \
+                      "main_visible_list_hash,mirror_visible_list_hash," \
+                      "environment_mode4,render_state_env_mode4,random_seed," \
+                      "anim_timer,tacho_rpm,engine_rpm,engine_rpm_jitter," \
+                      "tacho_needle_flash,player_throttle,rev_limit," \
+                      "drive_engine_rpm,race_phase,pad_type,pad_held," \
+                      "camera_view_mode,camera_button," \
+                      "course_index,grand_prix_class," \
+                      "grand_prix_mode,player_car_index,texture_page_wanted," \
+                      "texture_cursor_row,texture_target_row," \
+                      "course_object_count,course_objects_hash," \
+                      "anim_scenery_variant,anim_scenery2_variant," \
+                      "spinning_angle0,spinning_angle1," \
+                      "spinning_angle2,spinning_angle3," \
+                      "rival_render_hash,drawable_rival_count," \
+                      "rival0_x,rival0_z,rival1_x,rival1_z," \
+                      "rival2_x,rival2_z,rival3_x,rival3_z," \
+                      "rival0_speed,rival0_progress,rival0_yaw," \
+                      "rival0_lateral,rival0_collision,rival0_active," \
+                      "rival1_speed,rival1_progress,rival1_yaw," \
+                      "rival1_lateral,rival1_collision,rival1_active," \
+                      "rival2_speed,rival2_progress,rival2_yaw," \
+                      "rival2_lateral,rival2_collision,rival2_active," \
+                      "rival3_speed,rival3_progress,rival3_yaw," \
+                      "rival3_lateral,rival3_collision,rival3_active," \
+                      "player_render_hash," \
+                      "player_raw,rival0_raw,rival1_raw,rival2_raw,rival3_raw," \
+                      "car0_render_hash,car1_render_hash,car2_render_hash," \
+                      "car3_render_hash,car4_render_hash,car5_render_hash," \
+                      "car6_render_hash,car7_render_hash,car8_render_hash," \
+                      "car9_render_hash,car10_render_hash\n",
+                      g_SmokeCaptureManifest);
+                fflush(g_SmokeCaptureManifest);
+            }
+        }
+    }
+    if (script != NULL && script[0] != '\0') {
+        g_SmokeRawPadPath = 1;
+    } else {
+        script = RuntimeConfigGet("input.script");
+    }
+    copy = script != NULL && script[0] != '\0' ? strdup(script) : NULL;
+    for (token = copy != NULL ? strtok(copy, ",") : NULL;
+         token != NULL && g_SmokeInputCount < RAGE_SMOKE_INPUT_CAPACITY;
+         token = strtok(NULL, ",")) {
+        char *separator = strchr(token, ':');
+        char *rangeSeparator;
+        unsigned short buttons;
+        char *name;
+        int firstFrame;
+        int lastFrame;
+        if (separator == NULL) continue;
+        *separator = '\0';
+        name = separator + 1;
+        while (isspace((unsigned char)*name)) name++;
+        buttons = 0;
+        while (*name != '\0') {
+            char *next = strpbrk(name, "+|");
+            char *end;
+            if (next != NULL) *next = '\0';
+            end = name + strlen(name);
+            while (end > name && isspace((unsigned char)end[-1])) *--end = '\0';
+            buttons |= SmokeButton(name);
+            if (next == NULL) break;
+            name = next + 1;
+            while (isspace((unsigned char)*name)) name++;
+        }
+        if (buttons == 0) continue;
+        rangeSeparator = strchr(token, '-');
+        if (rangeSeparator != NULL) {
+            *rangeSeparator = '\0';
+            if (!RuntimeParseInt(rangeSeparator + 1, 10, 0, INT_MAX,
+                                 &lastFrame)) {
+                continue;
+            }
+        } else {
+            lastFrame = -1;
+        }
+        if (!RuntimeParseInt(token, 10, 0, INT_MAX, &firstFrame) ||
+            (rangeSeparator != NULL && lastFrame < firstFrame)) {
+            continue;
+        }
+        g_SmokeInputs[g_SmokeInputCount].firstFrame = firstFrame;
+        g_SmokeInputs[g_SmokeInputCount].lastFrame =
+            rangeSeparator != NULL ? lastFrame : firstFrame;
+        g_SmokeInputs[g_SmokeInputCount].held = rangeSeparator != NULL;
+        g_SmokeInputs[g_SmokeInputCount].buttons = buttons;
+        g_SmokeInputCount++;
+    }
+    free(copy);
+
+    if (stateScript == NULL || stateScript[0] == '\0') return;
+    copy = strdup(stateScript);
+    if (copy == NULL) return;
+    for (token = strtok(copy, ","); token != NULL &&
+         g_SmokeStateInputCount < 32; token = strtok(NULL, ",")) {
+        char *at = strchr(token, '@');
+        char *phaseAt;
+        char *colon = strchr(token, ':');
+        unsigned short buttons;
+        int scene;
+        int timer;
+        int phase = 0;
+        if (at == NULL || colon == NULL || at > colon) continue;
+        *at = '\0';
+        *colon = '\0';
+        phaseAt = strchr(at + 1, '@');
+        if (phaseAt != NULL) *phaseAt = '\0';
+        buttons = SmokeButton(colon + 1);
+        if (buttons == 0 ||
+            !RuntimeParseInt(token, 0, 0, INT_MAX, &scene) ||
+            !RuntimeParseInt(at + 1, 0, 0, INT_MAX, &timer) ||
+            (phaseAt != NULL &&
+             !RuntimeParseInt(phaseAt + 1, 0, 0, INT_MAX, &phase))) {
+            continue;
+        }
+        g_SmokeStateInputs[g_SmokeStateInputCount].scene = scene;
+        g_SmokeStateInputs[g_SmokeStateInputCount].timer = timer;
+        g_SmokeStateInputs[g_SmokeStateInputCount].phase = phase;
+        g_SmokeStateInputs[g_SmokeStateInputCount].hasPhase = phaseAt != NULL;
+        g_SmokeStateInputs[g_SmokeStateInputCount].buttons = buttons;
+        g_SmokeStateInputCount++;
+    }
+    free(copy);
+}
+
+int PortShouldExit(int frame_number) {
+    static int lastScene = -1;
+    static int lastFrontend = -1;
+    static int lastMenuScreen = -1;
+    static int lastSweepScreen = -1;
+    static int lastGameMode = -1;
+    static int lastOptionSweepMode = -1;
+    static int retireStep;
+    static int lastRetireStep;
+    static int retireWait;
+    static int lastCapturedScene = -1;
+    static int lastCapturedTimer = -1;
+    int index;
+    const char *toggleRendererFrame;
+    const char *restartRaceFrames;
+    const char *menuSweep;
+    if (!g_SmokeInitialized) {
+        g_SmokeInitialized = 1;
+        SmokeInitialize();
+    }
+    toggleRendererFrame = RuntimeConfigGet("hooks.toggle_renderer_frames");
+    if (toggleRendererFrame == NULL)
+        toggleRendererFrame = RuntimeConfigGet("hooks.toggle_renderer_frame");
+    if (SmokeFrameListContains(toggleRendererFrame, frame_number)) {
+        ModernToggle();
+    }
+    restartRaceFrames = RuntimeConfigGet("hooks.restart_race_frames");
+    /* A raw script drives the pad by writing its buffer and letting the game
+     * map it, which rebuilds g_PadPressed from scratch. That has to happen
+     * before anything below presses a button of its own, or it erases them:
+     * the intro skip pressed START, this ran afterwards, and every test with
+     * a raw script sat through the whole opening movie. */
+    if (g_SmokeRawPadPath) {
+        u16 buttons = 0;
+        for (index = 0; index < g_SmokeInputCount; index++) {
+            if ((g_SmokeInputs[index].held &&
+                 frame_number >= g_SmokeInputs[index].firstFrame &&
+                 frame_number <= g_SmokeInputs[index].lastFrame) ||
+                (!g_SmokeInputs[index].held &&
+                 frame_number == g_SmokeInputs[index].firstFrame)) {
+                buttons |= g_SmokeInputs[index].buttons;
+            }
+        }
+        g_PadBuffers[0] = 0;
+        g_PadBuffers[1] = 0x41;
+        g_PadBuffers[2] = (u8)~(buttons >> 8);
+        g_PadBuffers[3] = (u8)~buttons;
+        UpdatePadState();
+    }
+
+    if (g_SceneId == 12 &&
+        SmokeFrameListContains(restartRaceFrames, frame_number)) {
+        fprintf(stderr, "smoke race restart frame=%d timer=%d\n",
+                frame_number, g_SceneTimer);
+        ExitRaceScene(11);
+    }
+    if (RuntimeConfigEnabled("hooks.mirror_track") && g_SceneId >= 10 &&
+        g_SceneId <= 12) {
+        g_MirrorMode = 1;
+    }
+    /* Most scenario tests target post-intro state and historically ran
+     * without extracted movies. Native STR playback makes the real intro
+     * available, so skip it unless this is explicitly an FMV test. */
+    if (g_SceneId == 5 && !RuntimeConfigEnabled("diagnostics.fmv_trace") &&
+        !RuntimeConfigEnabled("hooks.play_fmv")) {
+        g_PadPressed |= PAD_START;
+    }
+    menuSweep = RuntimeConfigGet("hooks.menu_sweep");
+    if (menuSweep != NULL && g_SceneId == 8 && g_SceneTimer >= 200) {
+        int screen = 1 + (g_SceneTimer - 200) / 100;
+        if (screen <= MENU_SCREEN_ENGINEER_SHOP &&
+            lastSweepScreen != screen) {
+            MenuRuntimeReset();
+            MenuActivateScreen(screen);
+            GameMenuBusy = 0;
+            g_UiScriptProgress = 0;
+            g_UiScriptProgress2 = 0;
+            fprintf(stderr, "smoke menu sweep frame=%d timer=%d screen=%d\n",
+                    frame_number, g_SceneTimer, screen);
+            lastSweepScreen = screen;
+        }
+    }
+    if (RuntimeConfigEnabled("hooks.option_sweep") &&
+        g_SceneId == 23 && g_SceneTimer >= 200) {
+        int mode = 1 + (g_SceneTimer - 200) / 100;
+        if (mode >= 8 && mode <= 11) {
+            g_PadType = 0x23;
+        }
+        if (mode <= 11 && lastOptionSweepMode != mode) {
+            g_GameMode = mode;
+            lastOptionSweepMode = mode;
+            fprintf(stderr, "smoke option sweep frame=%d timer=%d mode=%d\n",
+                    frame_number, g_SceneTimer, mode);
+        }
+    }
+    for (index = 0; index < g_SmokeInputCount; index++) {
+        if (!g_SmokeRawPadPath &&
+            g_SmokeInputs[index].firstFrame == frame_number) {
+            g_PadPressed |= g_SmokeInputs[index].buttons;
+            fprintf(stderr, "smoke input frame=%d buttons=%04x\n",
+                    frame_number, g_SmokeInputs[index].buttons);
+        }
+        if (!g_SmokeRawPadPath && g_SmokeInputs[index].held &&
+            frame_number >= g_SmokeInputs[index].firstFrame &&
+            frame_number <= g_SmokeInputs[index].lastFrame) {
+            /* UpdatePlayerCar selects digital/analog input by controller type. */
+            g_PadType = 0x41;
+            g_PadHeld |= g_SmokeInputs[index].buttons;
+        }
+    }
+    for (index = 0; index < g_SmokeStateInputCount; index++) {
+        RageSmokeStateInput *input = &g_SmokeStateInputs[index];
+        int phaseMatches = !input->hasPhase ||
+            (input->scene == 4 && MenuFrontend()->state == input->phase) ||
+            (input->scene == 8 &&
+             MenuRuntimeCurrent()->activeScreen == input->phase) ||
+            (input->scene == 32 &&
+             (int)SceneRuntimeCurrent()->state.prologue.step == input->phase);
+        if (!input->fired && g_SceneId == input->scene && phaseMatches &&
+            g_SceneTimer <= input->timer) {
+            input->armed = 1;
+        }
+        if (input->armed && !input->fired && g_SceneId == input->scene &&
+            g_SceneTimer >= input->timer && phaseMatches) {
+            input->fired = 1;
+            g_PadPressed |= input->buttons;
+            fprintf(stderr,
+                    "smoke state input frame=%d scene=%d timer=%d buttons=%04x\n",
+                    frame_number, g_SceneId, g_SceneTimer, input->buttons);
+        }
+    }
+    /* Fixture for the last race of a class, not a forced class-clear flag.
+     * CommitClassProgress must still record this race and choose the award. */
+    if (!g_SmokePriorCourseWinsSeeded && g_SceneId == 12 &&
+        g_PlayerCar.lap > 0 && g_CourseProgress != NULL &&
+        RuntimeConfigEnabled("hooks.prior_course_wins")) {
+        int count = GrandPrixCourseCount(g_GrandPrixClass);
+        if (g_CourseIndex >= 0 && g_CourseIndex < count) {
+            for (int course = 0; course < 4; ++course)
+                g_CourseProgress->bestPlace[course] = course >= count ? 0xff :
+                    course == g_CourseIndex ? 0 : 1;
+            g_SmokePriorCourseWinsSeeded = 1;
+            fprintf(stderr, "smoke prior course wins seeded class=%d course=%d\n",
+                    g_GrandPrixClass, g_CourseIndex);
+        }
+    }
+    if (g_SmokeFinishFrame > 0 && frame_number >= g_SmokeFinishFrame &&
+        g_PlayerCar.lap > 0 && g_PlayerCar.lap < 257) {
+        /* Cross each remaining finish line through the normal race logic. */
+        g_PlayerCar.progressA = g_PlayerCar.lap * g_TrackLength;
+        g_PlayerCar.progressB = 0;
+    }
+    if (g_SmokeAutoConfirmFrame > 0 &&
+        frame_number >= g_SmokeAutoConfirmFrame &&
+        !(g_SceneId == 5 && RuntimeConfigEnabled("hooks.preserve_fmv"))) {
+        g_PadType = 0x41;
+        g_PadHeld |= 0x40;
+        if ((frame_number - g_SmokeAutoConfirmFrame) % 60 == 0)
+            g_PadPressed |= 0x40;
+    }
+    if (RuntimeConfigEnabled("hooks.retire") && g_SceneId == 12) {
+        if (retireStep == 0 && g_RacePhase == RACE_PHASE_ACTIVE &&
+            SceneRuntimeCurrent()->state.race.pauseDelay <= 0) {
+            g_PadPressed |= PAD_START;
+            retireStep = 1;
+            retireWait = 0;
+        } else if (retireStep == 1 && g_RacePaused && ++retireWait >= 10) {
+            g_PadPressed |= PAD_DOWN;
+            retireStep = 2;
+            retireWait = 0;
+        } else if (retireStep == 2 && g_RacePaused && ++retireWait >= 10) {
+            g_PadPressed |= PAD_START;
+            retireStep = 3;
+        }
+        if (retireStep != lastRetireStep) {
+            fprintf(stderr,
+                    "smoke retire step=%d frame=%d phase=%d paused=%d cursor=%d\n",
+                    retireStep, frame_number, g_RacePhase, g_RacePaused,
+                    SceneRuntimeCurrent()->state.race.optionCursor);
+            lastRetireStep = retireStep;
+        }
+    }
+    if (g_SceneId != lastScene || MenuFrontend()->state != lastFrontend) {
+        fprintf(stderr,
+                "smoke state frame=%d scene=%d frontend=%d sky_row=%d\n",
+                frame_number, g_SceneId, MenuFrontend()->state, g_SkyRowBase);
+        lastScene = g_SceneId;
+        lastFrontend = MenuFrontend()->state;
+    }
+    if (g_SceneId == 26) {
+        const MemoryCardSession *card = SceneRuntimeMemoryCard();
+        static s32 lastMask = -1, lastFree = -1, lastPage = -1;
+        int files = 0;
+        int bit;
+
+        for (bit = 0; bit < MEMORY_CARD_SAVE_SLOT_COUNT; bit++)
+            files += (card->slots.usedMask >> bit) & 1;
+        if (card->slots.usedMask != lastMask || card->freeBlocks != lastFree ||
+            card->menuPage != lastPage) {
+            fprintf(stderr,
+                    "smoke memory card frame=%d files=%d free=%d mask=%d page=%d\n",
+                    frame_number, files, card->freeBlocks,
+                    card->slots.usedMask, card->menuPage);
+            lastMask = card->slots.usedMask;
+            lastFree = card->freeBlocks;
+            lastPage = card->menuPage;
+        }
+    }
+    if (g_SceneId == 8 &&
+        MenuRuntimeCurrent()->activeScreen != lastMenuScreen) {
+        fprintf(stderr, "smoke menu frame=%d timer=%d screen=%d\n",
+                frame_number, g_SceneTimer,
+                MenuRuntimeCurrent()->activeScreen);
+        lastMenuScreen = MenuRuntimeCurrent()->activeScreen;
+    }
+    if (g_SceneId == 23 && g_GameMode != lastGameMode) {
+        fprintf(stderr, "smoke option frame=%d timer=%d mode=%d\n",
+                frame_number, g_SceneTimer, g_GameMode);
+        lastGameMode = g_GameMode;
+    }
+    if (g_SmokeCaptureDirectory != NULL &&
+        g_SmokeCaptureDirectory[0] != '\0' &&
+        g_SmokeCaptureTimerStride > 0 &&
+        (!g_SmokeHasCaptureScene || g_SceneId == g_SmokeCaptureScene) &&
+        (!g_SmokeHasStopScene || g_SceneId == g_SmokeStopScene) &&
+        g_SceneTimer >= 0 &&
+        (!g_SmokeHasCaptureTimerMin ||
+         g_SceneTimer >= g_SmokeCaptureTimerMin) &&
+        (!g_SmokeHasCaptureTimerMax ||
+         g_SceneTimer <= g_SmokeCaptureTimerMax) &&
+        g_SceneTimer % g_SmokeCaptureTimerStride == 0 &&
+        (g_SmokeCaptureAllPhases || g_SceneId != lastCapturedScene ||
+         g_SceneTimer != lastCapturedTimer)) {
+        char path[1024];
+        int length;
+        if (g_SmokeCaptureAllPhases) {
+            length = snprintf(path, sizeof(path),
+                              "%s/timer-%05d-f%05d-s%02d.ppm",
+                              g_SmokeCaptureDirectory, g_SceneTimer,
+                              frame_number, g_SceneId);
+        } else {
+            length = snprintf(path, sizeof(path), "%s/timer-%05d-s%02d.ppm",
+                              g_SmokeCaptureDirectory, g_SceneTimer,
+                              g_SceneId);
+        }
+        if (length <= 0 || (size_t)length >= sizeof(path) ||
+            !WriteCapturedFrame(path)) {
+            fprintf(stderr, "failed synchronized series capture: %s\n",
+                    length > 0 && (size_t)length < sizeof(path) ? path :
+                    "path too long");
+        } else {
+            fprintf(stderr,
+                    "smoke capture=%s frame=%d scene=%d timer=%d\n",
+                    path, frame_number, g_SceneId, g_SceneTimer);
+            SmokeWriteVisibleCells(g_SmokeCaptureDirectory, frame_number);
+            if (g_SmokeCaptureManifest != NULL) {
+                const char *filename = strrchr(path, '/');
+                filename = filename != NULL ? filename + 1 : path;
+                fprintf(g_SmokeCaptureManifest,
+                        "%s,%s," \
+                        "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d," \
+                        "%d,%u," \
+                        "%d,%d,%d,%d,%d,%d,%d,%d,%u,%d,%d," \
+                        "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d," \
+                        "%u,%d," \
+                        "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d," \
+                        "%d,%d,%d,%d," \
+                        "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d," \
+                        "%d,%d,%d,%d,%d,%d,%d,%d,%d," \
+                        "%u,%u,%u,%u," \
+                        "%d,%d,%u," \
+                        "%d,%d,%d," \
+                        "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d," \
+                        "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d," \
+                        "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d," \
+                        "%d,%d,%d,%d,%u",
+                        filename,
+                        RuntimeConfigEnabled("capture.draw_page") ?
+                            "draw" : "display",
+                        frame_number, g_SceneId, g_SceneTimer,
+                        g_PlayerCar.x, g_PlayerCar.z,
+                        g_PlayerCar.speed, g_PlayerCar.trackProgress,
+                        g_PlayerCar.lap, g_PlayerCar.bodyYaw,
+                        g_PlayerCar.bodyPitch, g_PlayerCar.bodyRoll,
+                        g_PlayerCar.trackLateralOffset,
+                        g_PlayerCar.modelYaw, g_MirrorPanelY,
+                        g_Camera.view.x, g_Camera.view.y, g_Camera.view.z,
+                        g_Camera.view.angleX, g_Camera.view.angleY,
+                        g_Camera.view.angleZ,
+                        (&g_RenderState)->geometry.matrix.m[0][0], (&g_RenderState)->geometry.matrix.m[0][1],
+                        (&g_RenderState)->geometry.matrix.m[0][2], (&g_RenderState)->geometry.matrix.m[1][0],
+                        (&g_RenderState)->geometry.matrix.m[1][1], (&g_RenderState)->geometry.matrix.m[1][2],
+                        (&g_RenderState)->geometry.matrix.m[2][0], (&g_RenderState)->geometry.matrix.m[2][1],
+                        (&g_RenderState)->geometry.matrix.m[2][2],
+                        g_RenderState.draw.clipX0,
+                        g_RenderState.draw.clipY0,
+                        g_RenderState.draw.clipX1,
+                        g_RenderState.draw.clipY1,
+                        (&g_RenderState)->pass.orderingFlag & 1,
+                        g_RenderState.mirror.viewMatrix.m[0][0], g_RenderState.mirror.viewMatrix.m[0][1],
+                        g_RenderState.mirror.viewMatrix.m[0][2], g_RenderState.mirror.viewMatrix.m[1][0],
+                        g_RenderState.mirror.viewMatrix.m[1][1], g_RenderState.mirror.viewMatrix.m[1][2],
+                        g_RenderState.mirror.viewMatrix.m[2][0], g_RenderState.mirror.viewMatrix.m[2][1],
+                        g_RenderState.mirror.viewMatrix.m[2][2],
+                        SmokeHashWords(g_MainVisibleCellMask, 32),
+                        SmokeHashWords(g_MirrorVisibleCellMask, 32),
+                        SmokeHashVisibleList(g_MainVisibleCellList),
+                        SmokeHashVisibleList(g_MirrorVisibleCellList),
+                        g_IsEnvironmentMode4,
+                        g_RenderState.geometry.envMode4, g_RandomSeed, g_AnimTimer,
+                        g_EngineRpm + g_EngineRpmJitter,
+                        g_EngineRpm, g_EngineRpmJitter, g_TachoShiftLightOn,
+                        g_PlayerCar.drive.acceleratorInput.value,
+                        g_CarSpec != NULL ? g_CarSpec->revLimit : 0,
+                        g_PlayerCar.drive.engineRpm, g_RacePhase,
+                        g_PadType, g_PadHeld,
+                        g_Camera.mode,
+                        g_PadButtonMapping[6],
+                        g_CourseIndex, g_GrandPrixClass, g_GrandPrixMode,
+                        g_PlayerCarIndex, g_TrackTexturePageWanted,
+                        g_TrackTextureCursorRow, g_TrackTextureTargetRow,
+                        g_CourseObjectCount,
+                        SmokeHashBytes(g_CourseObjects,
+                            (size_t)g_CourseObjectCount * sizeof(CourseObject)),
+                        g_SceneryAnimation.raceVariant,
+                        g_SceneryAnimation.presentationVariant,
+                        g_SpinningSceneryAngle[0], g_SpinningSceneryAngle[1],
+                        g_SpinningSceneryAngle[2], g_SpinningSceneryAngle[3],
+                        SmokeHashCarRenderState(g_Cars,
+                                                RACE_CAR_SLOT_COUNT),
+                        SmokeCountDrawableCars(g_Cars,
+                                               RACE_CAR_SLOT_COUNT),
+                        g_Cars[0].x, g_Cars[0].z,
+                        g_Cars[1].x, g_Cars[1].z,
+                        g_Cars[2].x, g_Cars[2].z,
+                        g_Cars[3].x, g_Cars[3].z,
+                        g_Cars[0].speed, g_Cars[0].trackProgress,
+                        g_Cars[0].bodyYaw, g_Cars[0].trackLateralOffset,
+                        g_Cars[0].collisionFlag, g_Cars[0].activeFlag,
+                        g_Cars[1].speed, g_Cars[1].trackProgress,
+                        g_Cars[1].bodyYaw, g_Cars[1].trackLateralOffset,
+                        g_Cars[1].collisionFlag, g_Cars[1].activeFlag,
+                        g_Cars[2].speed, g_Cars[2].trackProgress,
+                        g_Cars[2].bodyYaw, g_Cars[2].trackLateralOffset,
+                        g_Cars[2].collisionFlag, g_Cars[2].activeFlag,
+                        g_Cars[3].speed, g_Cars[3].trackProgress,
+                        g_Cars[3].bodyYaw, g_Cars[3].trackLateralOffset,
+                        g_Cars[3].collisionFlag, g_Cars[3].activeFlag,
+                        SmokeHashPlayerRenderState(&g_PlayerCar));
+                {
+                    int rivalIndex;
+                    const unsigned char *playerBytes =
+                        (const unsigned char *)&g_PlayerCar;
+                    size_t playerByteIndex;
+                    fputc(',', g_SmokeCaptureManifest);
+                    for (playerByteIndex = 0;
+                         playerByteIndex < sizeof(GameCarRuntime);
+                         playerByteIndex++) {
+                        fprintf(g_SmokeCaptureManifest, "%02x",
+                                playerBytes[playerByteIndex]);
+                    }
+                    for (rivalIndex = 0; rivalIndex < 4; rivalIndex++) {
+                        const unsigned char *bytes =
+                            (const unsigned char *)&g_Cars[rivalIndex];
+                        size_t byteIndex;
+                        fputc(',', g_SmokeCaptureManifest);
+                        for (byteIndex = 0; byteIndex < sizeof(GameCarRuntime);
+                             byteIndex++) {
+                            fprintf(g_SmokeCaptureManifest, "%02x",
+                                    bytes[byteIndex]);
+                        }
+                    }
+                    for (rivalIndex = 0;
+                         rivalIndex < RACE_CAR_SLOT_COUNT; rivalIndex++) {
+                        fprintf(g_SmokeCaptureManifest, ",%u",
+                                SmokeHashOneCarRenderState(
+                                    &g_Cars[rivalIndex]));
+                    }
+                    fputc('\n', g_SmokeCaptureManifest);
+                }
+                fflush(g_SmokeCaptureManifest);
+            }
+        }
+        lastCapturedScene = g_SceneId;
+        lastCapturedTimer = g_SceneTimer;
+    }
+    if (PortScenarioShouldExit()) return 1;
+    if (g_SmokeHasStopScene && g_SmokeHasStopSceneTimer &&
+        g_SceneId == g_SmokeStopScene &&
+        g_SceneTimer >= g_SmokeStopSceneTimer) {
+        fprintf(stderr, "smoke synchronized stop frame=%d scene=%d timer=%d\n",
+                frame_number, g_SceneId, g_SceneTimer);
+        return 1;
+    }
+    return g_SmokeFrameLimit > 0 && frame_number >= g_SmokeFrameLimit;
+}

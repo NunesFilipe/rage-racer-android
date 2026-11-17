@@ -1,0 +1,42 @@
+#include "game/menu.h"
+#include "game/menu_internal.h"
+#include "game/render.h"
+#include "game/render_state.h"
+
+enum { TIME_ATTACK_PLATE_PROGRESS_MAX = 12 };
+
+void DrawTimeAttackPlate(MenuWidgets *widgets) {
+    s32 step = widgets->timeAttackStep;
+    s32 progress;
+
+    if (step == 0) {
+        widgets->timeAttackProgress = 0;
+        return;
+    }
+
+    widgets->timeAttackProgress = AddClampedMenuValue(
+        widgets->timeAttackProgress, 0, 0, TIME_ATTACK_PLATE_PROGRESS_MAX);
+
+    if (step < 0) {
+        widgets->timeAttackProgress = AddClampedMenuValue(
+            widgets->timeAttackProgress, step, 0,
+            TIME_ATTACK_PLATE_PROGRESS_MAX);
+    }
+
+    progress = widgets->timeAttackProgress;
+    if (progress != 0 && RENDER_OT_BASE != NULL) {
+        s16 top = (s16)(0xD7 - progress);
+        s16 bottom = (s16)(0xD8 + progress);
+
+        GameDrawTexturedQuad(
+            RENDER_OT_BASE, 0x4C, top, 0x7C, top, 0x4C, bottom, 0x7C,
+            bottom, 0xCC, 0x38, 0xFC, 0x38, 0xCC, 0x50, 0xFC, 0x50,
+            0, 0, 0, 0x20F, 1, 0, 0x1C);
+    }
+
+    if (step > 0) {
+        widgets->timeAttackProgress = AddClampedMenuValue(
+            widgets->timeAttackProgress, step, 0,
+            TIME_ATTACK_PLATE_PROGRESS_MAX);
+    }
+}

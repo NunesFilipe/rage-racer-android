@@ -1,0 +1,146 @@
+#include "common.h"
+#include "game/audio.h"
+#include "game/audio_internal.h"
+#include "game/sound.h"
+#include "psyq/snd.h"
+
+#include <stdio.h>
+
+Audio g_Audio;
+s32 g_SceneId;
+SoundScale g_SoundScale;
+s16 g_SoundSlotTone[ENGINE_SOUND_SLOT_COUNT][ENGINE_SOUND_BANK_COUNT];
+
+static s32 s_damperSteps;
+static s32 s_fadeUpdates;
+static s32 s_reverbOffCalls;
+static s32 s_reverbOnCalls;
+static s32 s_reverbType;
+static s32 s_reverbLeft;
+static s32 s_reverbRight;
+static long s_voice;
+static long s_vabId;
+static long s_program;
+static long s_note;
+static s32 s_failures;
+void SpuVmDamperStep(void) { s_damperSteps++; }
+void UpdateSequenceFadeOut(void) { s_fadeUpdates++; }
+void SsUtSetReverbDepth(short left, short right) {
+    s_reverbLeft = (s32)left;
+    s_reverbRight = (s32)right;
+}
+short SsUtSetReverbType(short type) {
+    s_reverbType = type;
+    return type;
+}
+void SsUtReverbOn(void) { s_reverbOnCalls++; }
+void SsUtReverbOff(void) { s_reverbOffCalls++; }
+short SsUtKeyOnV(short voice, short vabId, short program, short tone, short note,
+                short fine, short volLeft, short volRight) {
+    (void)tone;
+    (void)fine;
+    (void)volLeft;
+    (void)volRight;
+    s_voice = voice;
+    s_vabId = vabId;
+    s_program = program;
+    s_note = note;
+    return voice;
+}
+
+static void Check(s32 condition, const char *label) {
+    if (!condition) {
+        printf("FAIL %s\n", label);
+        s_failures++;
+    }
+}
+
+static void TestSequenceTicking(void) {
+    s32 frame;
+
+    g_SceneId = 0;
+    g_Audio.seq.fade = -4;
+    for (frame = 0; frame < 5; frame++) TickSequenceAudio();
+    Check(s_damperSteps == 5 && s_fadeUpdates == 5,
+          "menu frames advance fades and flush queued effect voices");
+
+    g_SceneId = 0xC;
+    TickSequenceAudio();
+    Check(s_fadeUpdates == 5 && s_damperSteps == 6,
+          "sound-mode scene services the voice damper");
+
+    g_SceneId = 0;
+    g_Audio.seq.fade = 0;
+    for (frame = 0; frame < 3; frame++) TickSequenceAudio();
+    Check(s_fadeUpdates == 5 && s_damperSteps == 9,
+          "inactive menu PCM still flushes menu effects");
+
+    TickSequenceAudio();
+    TickSequenceAudio();
+    Check(s_damperSteps == 11,
+          "each menu frame flushes queued effect voices");
+
+    g_Audio.seq.fade = -4;
+    TickSequenceAudio();
+    Check(s_damperSteps == 12 && s_fadeUpdates == 6,
+          "pre-rendered music fades while effects continue to flush");
+}
+
+static void TestReverbDepth(void) {
+    SetReverbDepth(-1, 128);
+    Check(g_Audio.reverb.left == 0 && g_Audio.reverb.right == 127 &&
+              s_reverbLeft == 0 && s_reverbRight == 127,
+          "reverb depth clamps game and SPU values");
+
+    SetDefaultReverbDepth();
+    Check(g_Audio.reverb.left == 40 && g_Audio.reverb.right == 40,
+          "default reverb depth uses the game preset");
+}
+
+static void TestReverbPresets(void) {
+    s_reverbOffCalls = 0;
+    s_reverbOnCalls = 0;
+    SetReverbPreset(9, -3, 200);
+    Check(s_reverbOffCalls == 1 && s_reverbOnCalls == 1 &&
+              s_reverbType == 9,
+          "valid reverb preset restarts the SPU effect");
+    Check(g_Audio.reverb.left == 0 && g_Audio.reverb.right == 127,
+          "reverb preset applies clamped depths");
+
+    SetReverbPreset(0, 50, 60);
+    Check(s_reverbOffCalls == 2 && s_reverbOnCalls == 1 &&
+              g_Audio.reverb.left == 0 &&
+              g_Audio.reverb.right == 0,
+          "zero preset disables reverb");
+    SetReverbPreset(10, 50, 60);
+    Check(s_reverbOffCalls == 3 && s_reverbOnCalls == 1,
+          "preset above the supported range disables reverb");
+    SetReverbPreset(-1, 50, 60);
+    Check(s_reverbOffCalls == 4 && s_reverbOnCalls == 1,
+          "preset below the supported range disables reverb");
+}
+
+static void TestSoundSlotVoice(void) {
+    g_SoundScale.vabIds[1] = 23;
+    g_SoundSlotTone[2][1] = 71;
+    PlaySoundSlotVoice(2, 1, 1);
+    Check(s_voice == 16 && s_vabId == 23 && s_program == 71 && s_note == 60,
+          "sound slot maps to its reserved hardware voice and program");
+
+    s_voice = -1;
+    PlaySoundSlotVoice(-1, 1, 1);
+    PlaySoundSlotVoice(2, ENGINE_SOUND_BANK_COUNT, 1);
+    PlaySoundSlotVoice(2, 1, AUDIO_SLOT_COUNT);
+    Check(s_voice == -1, "invalid sound slot routes are ignored");
+}
+
+int main(void) {
+    TestSequenceTicking();
+    TestReverbDepth();
+    TestReverbPresets();
+    TestSoundSlotVoice();
+
+    if (s_failures != 0) return 1;
+    puts("audio runtime clocks sequences and applies reverb and slot voices");
+    return 0;
+}

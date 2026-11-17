@@ -1,0 +1,188 @@
+#include "common.h"
+#include "game/cd.h"
+#include "game/cd_internal.h"
+#include "psyq/cd.h"
+
+#include <stdio.h>
+#include <string.h>
+
+Cd g_Cd;
+s32 g_CdTrackEnded;
+s32 g_SceneId;
+CdlLOC g_CdTrackLoopPoint[18];
+
+static s32 s_trackSteps;
+static s32 s_playSteps;
+static s32 s_pauseSteps;
+static s32 s_fadeSteps;
+static s32 s_hostEnded;
+static s32 s_buildCalls;
+static s32 s_setVolume;
+static s32 s_cdCommand;
+static s32 s_serialVolumeCalls;
+
+void StepCdTrackRequest(void) { s_trackSteps++; }
+void StepCdPlayRequest(void) { s_playSteps++; }
+void StepCdPauseRequest(void) { s_pauseSteps++; }
+void StepCdVolumeFade(void) { s_fadeSteps++; }
+int Psyz_CdAudioEnded(void) { return s_hostEnded; }
+static s32 s_hostPlaying;
+int Psyz_CdAudioPlaying(void) { return s_hostPlaying; }
+void BuildCdTrackTable(void) { s_buildCalls++; }
+void SetCdVolume(s32 volume) { s_setVolume = volume; }
+
+void SsSetSerialVol(u8 channel, short left, short right) {
+    if (channel == 0 && left == 0x7fff && right == 0x7fff) {
+        s_serialVolumeCalls++;
+    }
+}
+
+long CdControl(long command, void *param, u_char *result) {
+    (void)param;
+    (void)result;
+    s_cdCommand = (s32)command;
+    return 1;
+}
+
+int CdPosToInt(CdlLOC *location) {
+    return location->minute * 60 * 75 + location->second * 75 +
+           location->sector;
+}
+
+#define CHECK(condition) do {                                                   \
+    if (!(condition)) {                                                         \
+        fprintf(stderr, "check failed at line %d: %s\n", __LINE__, #condition); \
+        return 1;                                                               \
+    }                                                                           \
+} while (0)
+
+static void Reset(void) {
+    memset(g_CdTrackLoopPoint, 0, sizeof(g_CdTrackLoopPoint));
+    g_Cd.pendingTrack = -1;
+    g_Cd.pendingCommand = CD_COMMAND_NONE;
+    g_Cd.currentTrack = 3;
+    g_Cd.trackStep = CD_TRACK_WAIT_FOR_DRIVE;
+    g_Cd.commandStep = CD_PLAY_WAIT_FOR_DRIVE;
+    g_CdTrackEnded = 0;
+    g_SceneId = 0;
+    s_trackSteps = 0;
+    s_playSteps = 0;
+    s_pauseSteps = 0;
+    s_fadeSteps = 0;
+    s_hostEnded = 0;
+    s_hostPlaying = 0;
+    g_Cd.playedSinceSelect = 1;
+}
+
+static int TestInitialization(void) {
+    s_buildCalls = 0;
+    s_setVolume = -1;
+    s_cdCommand = -1;
+    s_serialVolumeCalls = 0;
+    InitCdAudio();
+    CHECK(s_serialVolumeCalls == 1);
+    CHECK(s_cdCommand == CD_DRIVE_SET_MODE &&
+          g_Cd.mode ==
+              (CD_MODE_CDDA | CD_MODE_AUTO_PAUSE | CD_MODE_REPORT));
+    CHECK(s_buildCalls == 1 && s_setVolume == 127);
+    CHECK(g_Cd.pendingTrack == -1 && g_Cd.pendingCommand == CD_COMMAND_NONE);
+    CHECK(g_Cd.currentTrack == 2 && g_Cd.volume == 127);
+    return 0;
+}
+
+static int TestRequestDispatch(void) {
+    Reset();
+    g_Cd.pendingCommand = (CdCommandType)99;
+    g_Cd.commandStep = 99;
+    TickCdAudio();
+    CHECK(g_Cd.pendingCommand == CD_COMMAND_NONE &&
+          g_Cd.commandStep == CD_PLAY_WAIT_FOR_DRIVE);
+    CHECK(s_trackSteps == 0 && s_playSteps == 0 && s_pauseSteps == 0 &&
+          s_fadeSteps == 1);
+
+    Reset();
+    g_Cd.pendingTrack = 4;
+    g_Cd.pendingCommand = CD_COMMAND_PAUSE;
+    TickCdAudio();
+    CHECK(s_trackSteps == 1 && s_pauseSteps == 0 && s_fadeSteps == 1);
+
+    Reset();
+    g_Cd.pendingCommand = CD_COMMAND_PLAY;
+    TickCdAudio();
+    CHECK(s_playSteps == 1 && s_fadeSteps == 1);
+    g_Cd.pendingCommand = CD_COMMAND_PLAY;
+    TickCdAudio();
+    CHECK(s_playSteps == 2);
+    g_Cd.pendingCommand = CD_COMMAND_PAUSE;
+    TickCdAudio();
+    CHECK(s_pauseSteps == 1);
+    return 0;
+}
+
+static int TestEndOfTrackPolicy(void) {
+    Reset();
+    s_hostEnded = 1;
+    g_SceneId = 0x1c;
+    TickCdAudio();
+    CHECK(g_CdTrackEnded == 1 && g_Cd.pendingTrack == -1);
+
+    Reset();
+    s_hostEnded = 1;
+    g_CdTrackLoopPoint[0].second = 1;
+    g_CdTrackLoopPoint[3].second = 2;
+    TickCdAudio();
+    CHECK(g_Cd.pendingTrack == 3);
+    CHECK(g_Cd.trackStep == CD_TRACK_RESTART_WAIT_FOR_DRIVE);
+    CHECK(g_Cd.pendingCommand == CD_COMMAND_PLAY);
+    CHECK(g_Cd.commandStep == CD_PLAY_WAIT_FOR_DRIVE);
+
+    s_trackSteps = 0;
+    TickCdAudio();
+    CHECK(s_trackSteps == 1);
+    CHECK(g_Cd.trackStep == CD_TRACK_RESTART_WAIT_FOR_DRIVE);
+
+    Reset();
+    s_hostEnded = 1;
+    g_Cd.currentTrack = 0xFF;
+    TickCdAudio();
+    CHECK(g_Cd.pendingTrack == -1 && g_Cd.pendingCommand == CD_COMMAND_NONE);
+    CHECK(g_CdTrackEnded == 0);
+
+    Reset();
+    s_hostEnded = 1;
+    g_CdTrackLoopPoint[0].second = 2;
+    g_CdTrackLoopPoint[3].second = 1;
+    TickCdAudio();
+    CHECK(g_Cd.pendingTrack == -1 && g_Cd.pendingCommand == CD_COMMAND_NONE);
+
+    /* A stale EOF left by the previous track must not restart a freshly
+     * selected one before the game asks for it; once the host reports the
+     * selection playing, its own end restarts it as before. */
+    Reset();
+    s_hostEnded = 1;
+    g_CdTrackLoopPoint[0].second = 1;
+    g_CdTrackLoopPoint[3].second = 2;
+    RequestCdTrack(3);
+    CHECK(g_Cd.playedSinceSelect == 0);
+    g_Cd.pendingTrack = -1;
+    TickCdAudio();
+    CHECK(g_Cd.pendingTrack == -1 && g_Cd.pendingCommand == CD_COMMAND_NONE);
+    s_hostPlaying = 1;
+    s_hostEnded = 0;
+    TickCdAudio();
+    CHECK(g_Cd.playedSinceSelect == 1);
+    s_hostPlaying = 0;
+    s_hostEnded = 1;
+    TickCdAudio();
+    CHECK(g_Cd.pendingTrack == 3 && g_Cd.pendingCommand == CD_COMMAND_PLAY);
+    CHECK(g_Cd.playedSinceSelect == 0);
+    return 0;
+}
+
+int main(void) {
+    CHECK(TestInitialization() == 0);
+    CHECK(TestRequestDispatch() == 0);
+    CHECK(TestEndOfTrackPolicy() == 0);
+    puts("CD audio runtime preserves dispatch and end-of-track restart policy");
+    return 0;
+}

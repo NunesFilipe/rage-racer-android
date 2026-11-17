@@ -1,0 +1,173 @@
+#include "game/asset.h"
+#include "game/asset_internal.h"
+#include "game/car.h"
+#include "car_catalog.h"
+#include "game/audio.h"
+
+enum {
+    CAR_SELECT_BEGIN_AUDIO = 1,
+    CAR_SELECT_LOAD_SHARED_ASSETS,
+    CAR_SELECT_LOAD_INITIAL_MODEL,
+    CAR_SELECT_SCENE_MODEL_BANK = 14,
+};
+
+/* The car-select load begins immediately after SELBGM.  Keep its three audio
+ * ranges together while the next request reuses the legacy asset globals. */
+static AssetSelectBgmAssets s_carSelectAudioAssets;
+static s32 s_haveCarSelectAudioAssets;
+
+static void CaptureCarSelectAudioAssets(void) {
+    const AssetLoadTransaction *assets = AssetLoadTransactionCurrentResult(
+        AssetLoadTransactionGeneration());
+
+    s_haveCarSelectAudioAssets = 0;
+    if (assets != NULL && assets->request == ASSET_REQUEST_SELECT_BGM) {
+        s_carSelectAudioAssets = assets->payload.selectBgm;
+        s_haveCarSelectAudioAssets = 1;
+    }
+}
+
+typedef struct CarSelectAssetHeader {
+    s32 teamLogoSamplesOffset;
+    s32 courseModelsOffset;
+    s32 imageOffset;
+    ModelBankHeader sceneModelBank;
+} CarSelectAssetHeader;
+
+_Static_assert(offsetof(CarSelectAssetHeader, sceneModelBank) == 0xC,
+               "car-select model bank must remain at +0xC");
+
+s32 RequestCarSelectAssets(void) {
+    /* Do not re-capture on the polling calls made while this request is busy:
+     * the active transaction then belongs to CAR_SELECT, not SELBGM. */
+    if (g_AssetLoadState == 0 &&
+        g_AssetRequestType != ASSET_REQUEST_CAR_SELECT) {
+        CaptureCarSelectAudioAssets();
+    }
+    return RequestAssetLoad(ASSET_REQUEST_CAR_SELECT,
+                            CAR_SELECT_BEGIN_AUDIO, 0);
+}
+
+static void BeginCarSelectAudioLoad(void) {
+    if (s_haveCarSelectAudioAssets) {
+        g_AssetSubBlockPtr = s_carSelectAudioAssets.audioBody.data;
+        g_AssetSubBlockSize = s_carSelectAudioAssets.audioBody.size;
+    }
+    g_AssetLoadCursor = g_AssetSubBlockPtr;
+    g_AssetLoadState = CAR_SELECT_LOAD_SHARED_ASSETS;
+}
+
+static void LoadCarSelectSharedAssets(void) {
+    const CarSelectAssetHeader *header;
+    const CourseModelAssetHeader *courseModels;
+    u8 *image;
+    size_t sceneModelSize;
+    size_t courseModelSize;
+    size_t imageSize;
+    s32 loadedSize;
+
+    loadedSize = LoadAsset(ASSET_CAR_SELECT_SCREEN, g_AssetLoadCursor);
+    if (AssetLoadDidNotComplete(loadedSize)) return;
+
+    header = (const CarSelectAssetHeader *)(const void *)g_AssetLoadCursor;
+    if (loadedSize < (s32)offsetof(CarSelectAssetHeader, sceneModelBank) ||
+        header->teamLogoSamplesOffset <=
+            (s32)offsetof(CarSelectAssetHeader, sceneModelBank) ||
+        header->courseModelsOffset <= header->teamLogoSamplesOffset ||
+        (size_t)(header->courseModelsOffset -
+                 header->teamLogoSamplesOffset) <
+            TEAM_LOGO_SAMPLE_RECORD_COUNT * sizeof(TeamLogoSample) ||
+        header->imageOffset <= header->courseModelsOffset ||
+        header->imageOffset > loadedSize) {
+        FailAssetLoad();
+        return;
+    }
+    sceneModelSize = (size_t)header->teamLogoSamplesOffset -
+                     offsetof(CarSelectAssetHeader, sceneModelBank);
+    courseModelSize = (size_t)(header->imageOffset -
+                               header->courseModelsOffset);
+    imageSize = (size_t)(loadedSize - header->imageOffset);
+    courseModels = GetCourseModelAssetHeader(
+        ResolveConstAssetAddress(header, header->courseModelsOffset));
+    image = g_AssetLoadCursor + header->imageOffset;
+    if (!IsValidModelBankAsset(&header->sceneModelBank, sceneModelSize) ||
+        !IsValidCourseModelAsset(courseModels, courseModelSize) ||
+        !IsValidImageAsset(GetImageAssetHeaderWords(image), imageSize) ||
+        PortAssetRoomAt(image) < CAR_MODEL_BUFFER_SIZE) {
+        FailAssetLoad();
+        return;
+    }
+    if (!RegisterModelBank(&header->sceneModelBank, sceneModelSize,
+                           CAR_SELECT_SCENE_MODEL_BANK) ||
+        !RegisterCourseModels(courseModels, courseModelSize) ||
+        !UploadImageAsset(GetImageAssetHeaderWords(image), imageSize)) {
+        FailAssetLoad();
+        return;
+    }
+    g_TeamLogoSampleData =
+        ResolveConstAssetAddress(header, header->teamLogoSamplesOffset);
+    g_CarModelBuffer = image;
+    g_ImageBlockBuffer = image + CAR_MODEL_BUFFER_SIZE;
+    g_ImageBlockSize = 0;
+    g_AssetLoadState = CAR_SELECT_LOAD_INITIAL_MODEL;
+}
+
+static void LoadInitialCarSelectModel(void) {
+    s32 carIndex = g_PlayerCarIndex;
+    s32 variantIndex;
+    s32 assetIndex;
+    s32 loadedSize;
+
+    if ((u32)carIndex >= GAME_CAR_COUNT || g_CarTable == NULL ||
+        g_CarModelBuffer == NULL) {
+        FailAssetLoad();
+        return;
+    }
+    variantIndex = GetCarAssetIndex(
+        carIndex, g_CarTable[carIndex].modelVariant);
+    if (variantIndex < 0) {
+        FailAssetLoad();
+        return;
+    }
+    assetIndex = CarVariantAssetIndex(ASSET_CAR_1ST_BASE, variantIndex);
+
+    loadedSize = LoadAsset(assetIndex, g_CarModelBuffer);
+    if (AssetLoadDidNotComplete(loadedSize)) return;
+
+    /* Round-screen relocation copies this serialized metadata verbatim. */
+    CarCatalogApplyModelAvailability(carIndex, g_CarTable[carIndex].modelVariant,
+        GetCarModelAsset(g_CarModelBuffer));
+    if (!InstallCarModelAsset(GetCarModelAsset(g_CarModelBuffer),
+                              (size_t)loadedSize, 0, carIndex)) {
+        FailAssetLoad();
+        return;
+    }
+    /* The catalog governs the active, native copy consumed by the menu. */
+    CarCatalogApplyModelAvailability(carIndex, g_CarTable[carIndex].modelVariant,
+        g_CarModelSlots[0]);
+    SelectCarModelSlot(0);
+    g_CarModelSlot = 0;
+    g_CarModelSlotAssetIndex[0] = variantIndex;
+    g_AssetLoadState = 0;
+}
+
+void LoadCarSelectAssets(void) {
+    if (g_AssetLoadState == 0) {
+        return;
+    }
+
+    switch (g_AssetLoadState) {
+    case CAR_SELECT_BEGIN_AUDIO:
+        BeginCarSelectAudioLoad();
+        break;
+    case CAR_SELECT_LOAD_SHARED_ASSETS:
+        LoadCarSelectSharedAssets();
+        break;
+    case CAR_SELECT_LOAD_INITIAL_MODEL:
+        LoadInitialCarSelectModel();
+        break;
+    default:
+        FailAssetLoad();
+        break;
+    }
+}

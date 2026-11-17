@@ -1,0 +1,197 @@
+#include "common.h"
+#include "game/menu.h"
+#include "game/render_state.h"
+
+#include <stdio.h>
+#include <limits.h>
+#include <string.h>
+
+u8 g_TeamNameLength;
+u8 g_TeamNameChars[16];
+GameRenderState g_RenderState;
+
+typedef struct SpriteRecord {
+    s16 x;
+    s16 y;
+    u16 height;
+    u16 u;
+    u16 v;
+    u32 flags;
+} SpriteRecord;
+
+typedef struct RectRecord {
+    s32 x;
+    s32 y;
+    s32 r;
+    s32 g;
+    s32 b;
+} RectRecord;
+
+static SpriteRecord s_sprites[64];
+static RectRecord s_rects[16];
+static s32 s_spriteCount;
+static s32 s_rectCount;
+static s32 s_outlineCount;
+
+s32 rsin(s32 angle) {
+    if (angle == 0) {
+        return 4096;
+    }
+    return angle == 0x800 ? -4096 : 0;
+}
+
+void DrawSprite(GameOrderingTableEntry *ot, s16 x, s16 y, s16 width, u16 height, u16 u,
+                u16 v, u8 r, u8 g, u8 b, u16 clut, s32 shade,
+                s32 semiTrans, u32 flags) {
+    (void)ot;
+    (void)width;
+    (void)r;
+    (void)g;
+    (void)b;
+    (void)clut;
+    (void)shade;
+    (void)semiTrans;
+    s_sprites[s_spriteCount++] = (SpriteRecord){x, y, height, u, v, flags};
+}
+
+void DrawSolidRect(GameOrderingTableEntry *ot, s32 x, s32 y, s32 width, s32 height, s32 r,
+                   s32 g, s32 b, s32 alpha) {
+    (void)ot;
+    (void)width;
+    (void)height;
+    (void)alpha;
+    s_rects[s_rectCount++] = (RectRecord){x, y, r, g, b};
+}
+
+void DrawRectOutline(GameOrderingTableEntry *ot, s32 x, s32 y, s32 width,
+                     s32 height, u8 r,
+                     u8 g, u8 b, u8 alpha) {
+    (void)ot;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    (void)r;
+    (void)g;
+    (void)b;
+    (void)alpha;
+    s_outlineCount++;
+}
+
+#define CHECK(condition)                                                       \
+    do {                                                                       \
+        if (!(condition)) {                                                    \
+            fprintf(stderr, "check failed at line %d: %s\n", __LINE__,         \
+                    #condition);                                               \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+static void ResetDraws(void) {
+    s_spriteCount = 0;
+    s_rectCount = 0;
+    s_outlineCount = 0;
+}
+
+int main(void) {
+    LogoSample logo = {0};
+    TeamLogo teamLogo = {0};
+    TeamName teamName = {0};
+    static GameOrderingTableEntry orderingTable[2];
+
+    RENDER_OT_BASE = orderingTable;
+    teamLogo.swatches[0] = 0x7FFF;
+    DrawLogoSamplePanel(&logo, &teamLogo, 0, 0);
+    CHECK(logo.panelSlide == 0 && s_spriteCount == 0);
+
+    DrawLogoSamplePanel(&logo, &teamLogo, 1, 27);
+    CHECK(logo.panelSlide == 1);
+    CHECK(s_spriteCount == 5 && s_sprites[0].y == 494);
+    CHECK(s_sprites[0].u == 16 && s_sprites[1].u == 56);
+    CHECK(s_rectCount == 15 && s_rects[0].x == 0x8B);
+    CHECK(s_rects[0].r == 248 && s_rects[0].g == 248 &&
+          s_rects[0].b == 248);
+    CHECK(s_outlineCount == 1);
+
+    ResetDraws();
+    logo.panelSlide = 5;
+    DrawLogoSamplePanel(&logo, &teamLogo, 1, 1);
+    CHECK(logo.panelSlide == 5 && s_sprites[0].y == 344);
+
+    ResetDraws();
+    logo.panelSlide = INT_MAX;
+    DrawLogoSamplePanel(&logo, &teamLogo, INT_MAX, -1);
+    CHECK(logo.panelSlide == 5);
+    CHECK(s_sprites[0].u == 0 && s_sprites[1].u == 0);
+
+    ResetDraws();
+    logo.panelSlide = INT_MIN;
+    DrawLogoSamplePanel(&logo, &teamLogo, -1, 99);
+    CHECK(logo.panelSlide == 0);
+    CHECK(s_sprites[0].u == 72 && s_sprites[1].u == 72);
+
+    ResetDraws();
+    g_TeamNameLength = 3;
+    g_TeamNameChars[0] = 0;
+    g_TeamNameChars[1] = 10;
+    g_TeamNameChars[2] = 11;
+    teamName.entrySlide = 25;
+    teamName.cursorPhase = 0;
+    DrawTeamNameEntry(&teamName, 1, 12);
+
+    CHECK(teamName.entrySlide == 25);
+    CHECK(s_spriteCount == 50);
+    CHECK(s_rectCount == 1 && s_rects[0].x == 0x60 && s_rects[0].y == 0xFD);
+    CHECK(s_rects[0].g == -1);
+    CHECK(s_sprites[0].x == 0x77 && s_sprites[0].y == 0x7D);
+    CHECK(s_sprites[1].x == 0x62 && s_sprites[1].y == 0x101);
+    CHECK(s_sprites[1].u == 0x58 && s_sprites[1].v == 0x18);
+    CHECK(s_sprites[2].x == 0x56 && s_sprites[2].u == 0);
+    CHECK(s_sprites[12].x == 0x56 && s_sprites[12].y == 0x101);
+    CHECK(s_sprites[48].flags == 0x3B && s_sprites[49].flags == 0x3B);
+    CHECK(teamName.cursorPhase == 0x60);
+
+    ResetDraws();
+    g_TeamNameLength = 0;
+    teamName.entrySlide = 25;
+    teamName.cursorPhase = 0x800;
+    DrawTeamNameEntry(&teamName, 1, 0);
+    CHECK(s_rectCount == 1 && s_rects[0].g == -129);
+    CHECK(teamName.cursorPhase == 0x860);
+
+    ResetDraws();
+    memset(g_TeamNameChars, 1, sizeof(g_TeamNameChars));
+    g_TeamNameLength = 0xFF;
+    DrawTeamNameEntry(&teamName, 1, -1);
+    CHECK(s_rectCount == 1);
+    CHECK(s_rects[0].x == 0x54 && s_rects[0].y == 0xE5);
+    CHECK(s_spriteCount == 53);
+
+    ResetDraws();
+    teamName.entrySlide = INT_MAX;
+    teamName.cursorPhase = INT_MAX;
+    DrawTeamNameEntry(&teamName, INT_MAX, 0);
+    CHECK(teamName.entrySlide == 25);
+    CHECK(teamName.cursorPhase == (s32)((u32)INT_MAX + 0x60u));
+
+    ResetDraws();
+    teamName.entrySlide = INT_MIN;
+    DrawTeamNameEntry(&teamName, -1, 0);
+    CHECK(teamName.entrySlide == 0);
+    CHECK(s_spriteCount == 0);
+
+    ResetDraws();
+    DrawTeamNameEntry(&teamName, 0, 0);
+    CHECK(teamName.entrySlide == 0 && s_spriteCount == 0);
+
+    RENDER_OT_BASE = NULL;
+    DrawTeamNameEntry(&teamName, 3, 0);
+    CHECK(teamName.entrySlide == 3 && s_spriteCount == 0);
+
+    logo.panelSlide = 0;
+    DrawLogoSamplePanel(&logo, &teamLogo, 3, 0);
+    CHECK(logo.panelSlide == 3 && s_spriteCount == 0);
+
+    puts("logo and team name panels preserve their layout and animation");
+    return 0;
+}

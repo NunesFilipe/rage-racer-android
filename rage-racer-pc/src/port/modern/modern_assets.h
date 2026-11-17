@@ -1,0 +1,55 @@
+#ifndef RAGE_MODERN_ASSETS_H
+#define RAGE_MODERN_ASSETS_H
+
+#include "render/render_world.h"
+#include "render/render_material.h"
+#include "render/render_material_storage.h"
+#include "render/rmesh_cache.h"
+#include "modern_asset_image.h"
+
+int ModernAssetsInit(void);
+/* Headless workshop tools: catalog to stdout, or one authored source mesh. */
+int ModernAssetsCarCatalog(void);
+int ModernAssetsExportCar(const char *key, const char *path);
+/* Active sessions accept NULL (ensure ready) or the exact same cache-root
+ * spelling. A different explicit root fails without changing borrowed assets
+ * or their generation. Switching sources requires full session teardown. */
+int ModernAssetsInitRoot(const char *root);
+void ModernAssetsShutdown(void);
+const RageRuntimeCachedMesh *ModernAssetsFind(
+    const RenderMeshInstance *instance);
+int ModernAssetsReady(void);
+/* Process-local lifetime token, not a content fingerprint. Changes on successful
+ * session creation and retirement; stable across retries and idempotent calls.
+ * Borrowed meshes remain valid only within their owning live session. */
+uint64_t ModernAssetsGeneration(void);
+uint32_t ModernAssetsCachedMeshCount(void);
+const RageRuntimeMesh *ModernAssetsMeshLookup(
+    void *context, const RenderMeshInstance *instance);
+/* Build-stage lookup, after WarmWorld. Missing assets stay missing; no import. */
+const RageRuntimeMesh *ModernAssetsResidentMeshLookup(
+    void *context, const RenderMeshInstance *instance);
+/* On success, definition paths refer to caller-owned storage, not shared
+ * scratch bytes. Keep storage at a stable address until done with the view.
+ * Image pixels have separate ownership and must be freed with the API below.
+ * Failure leaves all caller outputs unchanged and releases intermediate pixels.
+ * Before reusing an output image for a successful load, free its old pixels.
+ * Cached sidecar definitions are immutable once validated in this session;
+ * edits become visible after full shutdown/reinitialization. Failed catalog
+ * opens are retryable. Pixel files are read separately, not a source snapshot. */
+int ModernAssetsLoadMaterial(const RenderMeshInstance *instance,
+                             uint32_t material, uint8_t variant,
+                             RageRenderMaterial *definition,
+                             ModernAssetImage *image,
+                             RageRenderMaterialStorage *storage);
+/* layout is copied in the current frame. NULL is the explicit legacy-capture
+ * path (versions 1-6), which still resolves the current game layout. */
+int ModernAssetsLoadSkyImage(uint32_t assetKey,
+    const RageSkyPanoramaLayout *layout, ModernAssetImage *image);
+void ModernAssetsFreeMaterialImage(ModernAssetImage *image);
+/* Import meshes after a completed logic frame, before presentation begins.
+ * This may decode source data and must never run from the GPU prepare/draw
+ * path, which is also entered for high-FPS repeat presentations. */
+void ModernAssetsPrepareWorld(const RenderWorld *world);
+
+#endif

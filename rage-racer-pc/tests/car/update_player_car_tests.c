@@ -1,0 +1,222 @@
+#include "game/car.h"
+#include "game/car_internal.h"
+#include "game/race.h"
+#include "game/state.h"
+
+#include <limits.h>
+#include <stdio.h>
+#include <string.h>
+
+u8 g_PadType;
+GameCarSpec *g_CarSpec;
+s32 g_ShiftTargetRpm;
+
+static GameCarSpec s_spec;
+static char s_order[64];
+static int s_orderLength;
+static s32 s_skid;
+static s32 s_crash;
+static s32 s_jumpGround;
+static s32 s_responseSkid;
+static s32 s_responseCrash;
+static int s_shiftMapping;
+static int s_failures;
+
+static void Step(char step) {
+    s_order[s_orderLength++] = step;
+    s_order[s_orderLength] = '\0';
+}
+
+s32 IsCarFacingBackwards(const PlayerCarRuntime *car) {
+    (void)car;
+    Step('B');
+    return 1;
+}
+
+void ShiftPlayerGears(PlayerCarRuntime *car, int useAlternateMapping) {
+    (void)car;
+    s_shiftMapping = useAlternateMapping;
+    Step('C');
+}
+
+void UpdateCarBodyRoll(PlayerCarRuntime *car) {
+    (void)car;
+    Step('D');
+}
+
+void UpdatePlayerSteeringTarget(PlayerCarRuntime *car) {
+    (void)car;
+    Step('E');
+}
+
+void ReadPlayerCarInput(GameCarDrive *drive) {
+    (void)drive;
+    Step('F');
+}
+
+void UpdateCarDrivetrain(PlayerCarRuntime *car) {
+    (void)car;
+    Step('G');
+}
+
+void UpdatePlayerControlFeedback(PlayerCarRuntime *car) {
+    (void)car;
+    Step('H');
+}
+
+void CalculatePlayerBodyOffset(PlayerCarRuntime *car) {
+    car->motionX = 5;
+    car->motionY = 0;
+    car->motionZ = 7;
+    Step('I');
+}
+
+void AccumulateLapProgress(GameCarRuntime *car) {
+    (void)car;
+    Step('J');
+}
+
+s32 ResolvePlayerTrackContact(PlayerCarRuntime *car) {
+    (void)car;
+    Step('K');
+    return s_skid;
+}
+
+s32 Random15(void) {
+    Step('L');
+    return 32767;
+}
+
+s32 CollidePlayerWithCars(PlayerCarRuntime *car) {
+    (void)car;
+    Step('M');
+    return s_crash;
+}
+
+void StartCarBodyKick(GameCarRuntime *car, CarBodyKickMode mode) {
+    (void)car;
+    if (mode != CAR_BODY_KICK_CORNERING) {
+        s_failures++;
+    }
+    Step('N');
+}
+
+void UpdatePlayerJump(PlayerCarRuntime *car, s32 groundHeight) {
+    (void)car;
+    s_jumpGround = groundHeight;
+    Step('P');
+}
+
+void UpdatePlayerTilt(PlayerCarRuntime *car) {
+    (void)car;
+    Step('Q');
+}
+
+void UpdateCarCrestHop(GameCarRuntime *car) {
+    (void)car;
+    Step('R');
+}
+
+void ApplyPlayerContactResponse(PlayerCarRuntime *car, s32 skid, s32 crash) {
+    (void)car;
+    s_responseSkid = skid;
+    s_responseCrash = crash;
+    Step('S');
+}
+
+void UpdatePlayerEnginePresentation(PlayerCarRuntime *car) {
+    (void)car;
+    Step('T');
+}
+
+static void Reset(PlayerCarRuntime *car) {
+    memset(car, 0, sizeof(*car));
+    memset(&s_spec, 0, sizeof(s_spec));
+    s_spec.revLimit = 8000;
+    s_spec.redline = 6000;
+    g_CarSpec = &s_spec;
+    g_ShiftTargetRpm = 7000;
+    g_PadType = PAD_TYPE_DIGITAL;
+    s_orderLength = 0;
+    s_order[0] = '\0';
+    s_skid = 0;
+    s_crash = 0;
+    s_jumpGround = 0;
+    s_responseSkid = 0;
+    s_responseCrash = 0;
+    s_shiftMapping = -1;
+    car->x = 100;
+    car->y = 50;
+    car->z = 200;
+    car->positionW = 77;
+    car->motionX = 10;
+    car->motionZ = 20;
+}
+
+static void CheckOrder(const char *expected) {
+    if (strcmp(s_order, expected) != 0) {
+        printf("FAIL order: got %s expected %s\n", s_order, expected);
+        s_failures++;
+    }
+}
+
+#define CHECK(condition) do {                                                \
+    if (!(condition)) {                                                      \
+        printf("FAIL line %d: %s\n", __LINE__, #condition);                 \
+        s_failures++;                                                        \
+    }                                                                        \
+} while (0)
+
+int main(void) {
+    PlayerCarRuntime car;
+
+    Reset(&car);
+    car.drive.accelPos = 640;
+    car.drive.brakePos = 1280;
+    UpdatePlayerCar(&car);
+    CheckOrder("BCDEFGHIJKMPQRST");
+    CHECK(car.facingBackwards == 1 && s_shiftMapping == 0);
+    CHECK(car.x == 98 && car.z == 193);
+    CHECK(car.y == 50 && car.positionW == 77);
+    CHECK(s_jumpGround == 42);
+    CHECK(s_responseSkid == 0 && s_responseCrash == 0);
+
+    Reset(&car);
+    g_PadType = PAD_TYPE_NEGCON;
+    car.verticalMotionState = 1;
+    car.drive.shiftRpmDelta = 1;
+    g_ShiftTargetRpm = 0;
+    s_skid = 3;
+    s_crash = 1;
+    UpdatePlayerCar(&car);
+    CheckOrder("BCDFGHIJKLMNPQRST");
+    CHECK(s_shiftMapping == 1);
+    CHECK(car.bodyPitch > 0);
+    CHECK(s_responseSkid == 3 && s_responseCrash == 1);
+
+    Reset(&car);
+    car.x = INT_MIN;
+    car.z = INT_MAX;
+    car.y = INT_MIN;
+    car.motionX = INT_MAX;
+    car.motionZ = INT_MIN;
+    car.drive.accelPos = INT_MAX;
+    car.drive.brakePos = INT_MIN;
+    car.drive.shiftRpmDelta = 1;
+    car.bodyPitch = INT_MAX;
+    car.bodyRoll = INT_MAX;
+    car.bodyRollVelocity = INT_MAX;
+    g_ShiftTargetRpm = -100000;
+    UpdatePlayerCar(&car);
+    CHECK(car.x == 6 && car.z == 6);
+    CHECK(car.bodyPitch == 2147483407);
+    CHECK(car.bodyRoll == -2);
+    CHECK(s_jumpGround == 2147483640);
+
+    if (s_failures != 0) {
+        printf("%d player update orchestration checks failed\n", s_failures);
+        return 1;
+    }
+    puts("player update orchestrates each physics stage in order");
+    return 0;
+}

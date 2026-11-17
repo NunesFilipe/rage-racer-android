@@ -1,0 +1,769 @@
+add_executable(region_profile_tests region_profile_tests.c)
+target_link_libraries(region_profile_tests PRIVATE rage-content)
+add_test(NAME region_profile COMMAND region_profile_tests)
+set_tests_properties(region_profile PROPERTIES LABELS unit)
+
+add_executable(menu_music_asset_tests menu_music_asset_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/menu_music_asset.c)
+target_include_directories(menu_music_asset_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(MSVC)
+    target_compile_options(menu_music_asset_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(menu_music_asset_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME menu_music_asset COMMAND menu_music_asset_tests)
+set_tests_properties(menu_music_asset PROPERTIES LABELS unit)
+
+add_executable(car_catalog_profile_tests
+    car_catalog_profile_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/car_catalog_profile.c
+    ${CMAKE_SOURCE_DIR}/src/port/platform_paths.c)
+target_include_directories(car_catalog_profile_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(APPLE)
+    target_link_libraries(car_catalog_profile_tests PRIVATE "-framework CoreFoundation")
+endif()
+if(MSVC)
+    target_compile_options(car_catalog_profile_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(car_catalog_profile_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME car_catalog_profile COMMAND car_catalog_profile_tests)
+set_tests_properties(car_catalog_profile PROPERTIES LABELS unit)
+
+add_executable(port_car_catalog_tests
+    car_catalog_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/car_catalog.c)
+target_link_libraries(port_car_catalog_tests PRIVATE rage-car-catalog)
+target_include_directories(port_car_catalog_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include ${CMAKE_SOURCE_DIR}/src/port ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include)
+target_compile_definitions(port_car_catalog_tests PRIVATE __psyz=1)
+target_compile_definitions(port_car_catalog_tests PRIVATE
+    RAGE_SOURCE_DIRECTORY="${CMAKE_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(port_car_catalog_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(port_car_catalog_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+endif()
+if(MSVC)
+    target_compile_options(port_car_catalog_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(port_car_catalog_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME port_car_catalog COMMAND port_car_catalog_tests)
+set_tests_properties(port_car_catalog PROPERTIES LABELS unit)
+
+add_executable(cd_backend_lifecycle_tests cd_backend_lifecycle_tests.c)
+target_link_libraries(cd_backend_lifecycle_tests PRIVATE psyz)
+add_test(NAME cd_backend_lifecycle COMMAND cd_backend_lifecycle_tests)
+set_tests_properties(cd_backend_lifecycle PROPERTIES LABELS functional TIMEOUT 30)
+
+add_executable(pcm_metrics_tests pcm_metrics_tests.c ${CMAKE_SOURCE_DIR}/src/port/pcm_metrics.c)
+target_include_directories(pcm_metrics_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/port)
+if(MSVC)
+    target_compile_options(pcm_metrics_tests PRIVATE /W4 /WX)
+    target_compile_definitions(pcm_metrics_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+    target_compile_options(pcm_metrics_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME pcm_metrics COMMAND pcm_metrics_tests)
+set_tests_properties(pcm_metrics PROPERTIES LABELS unit)
+
+add_executable(audio_lifecycle_tests audio_lifecycle_tests.c)
+target_link_libraries(audio_lifecycle_tests PRIVATE psyz SDL3::SDL3)
+if(MSVC)
+    target_compile_options(audio_lifecycle_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(audio_lifecycle_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME audio_lifecycle COMMAND audio_lifecycle_tests)
+add_test(NAME audio_exit_cleanup COMMAND audio_lifecycle_tests exit-active)
+set_tests_properties(audio_lifecycle audio_exit_cleanup PROPERTIES
+    LABELS functional TIMEOUT 30)
+
+add_executable(debug_route_tests debug_route_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/debug_route.c)
+target_include_directories(debug_route_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/port)
+add_test(NAME debug_route COMMAND debug_route_tests)
+set_tests_properties(debug_route PROPERTIES LABELS unit)
+add_executable(debug_autopilot_tests debug_autopilot_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/debug_autopilot.c
+    ${CMAKE_SOURCE_DIR}/src/port/debug_route.c)
+target_include_directories(debug_autopilot_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(debug_autopilot_tests PRIVATE __psyz=1)
+foreach(mode disabled drive timeout races reverse)
+    add_test(NAME debug_autopilot_${mode} COMMAND debug_autopilot_tests ${mode})
+    set_tests_properties(debug_autopilot_${mode} PROPERTIES LABELS unit)
+endforeach()
+
+add_executable(disc_iso_tests
+    disc_iso_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/disc_iso.c)
+target_include_directories(disc_iso_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(disc_iso_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME disc_iso COMMAND disc_iso_tests)
+set_tests_properties(disc_iso PROPERTIES LABELS unit)
+
+add_executable(disc_raw_file_tests
+    disc_raw_file_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/disc_raw_file.c)
+target_include_directories(disc_raw_file_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(disc_raw_file_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME disc_raw_file COMMAND disc_raw_file_tests)
+set_tests_properties(disc_raw_file PROPERTIES LABELS unit)
+
+add_executable(disc_discovery_tests
+    disc_discovery_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/disc_discovery.c)
+target_include_directories(disc_discovery_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(disc_discovery_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME disc_discovery COMMAND disc_discovery_tests)
+set_tests_properties(disc_discovery PROPERTIES LABELS functional)
+
+add_executable(chd_track_layout_tests
+    chd_track_layout_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/chd_track_layout.c)
+target_include_directories(chd_track_layout_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(chd_track_layout_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME chd_track_layout COMMAND chd_track_layout_tests)
+set_tests_properties(chd_track_layout PROPERTIES LABELS unit)
+
+add_executable(cdda_file_tests
+    cdda_file_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/cdda_file.c)
+target_include_directories(cdda_file_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+target_compile_definitions(cdda_file_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(cdda_file_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME cdda_file COMMAND cdda_file_tests)
+set_tests_properties(cdda_file PROPERTIES LABELS unit)
+
+add_executable(gte_matrix_compat_tests
+    gte_matrix_compat_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/gte_matrix_compat.c)
+target_compile_definitions(gte_matrix_compat_tests PRIVATE __psyz=1)
+target_include_directories(gte_matrix_compat_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(gte_matrix_compat_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME gte_matrix_compat COMMAND gte_matrix_compat_tests)
+set_tests_properties(gte_matrix_compat PROPERTIES LABELS unit)
+
+add_executable(host_storage_tests
+    host_storage_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/host_storage.c)
+target_compile_definitions(host_storage_tests PRIVATE __psyz=1)
+target_include_directories(host_storage_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(host_storage_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME host_storage COMMAND host_storage_tests)
+set_tests_properties(host_storage PROPERTIES LABELS functional)
+
+add_executable(spu_vm_flush_tests
+    spu_vm_flush_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/spu_vm_flush.c)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(spu_vm_flush_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME spu_vm_flush COMMAND spu_vm_flush_tests)
+set_tests_properties(spu_vm_flush PROPERTIES LABELS unit)
+
+add_executable(archive_index_tests
+    archive_index_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/archive_index.c)
+target_include_directories(archive_index_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(archive_index_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME archive_index COMMAND archive_index_tests)
+set_tests_properties(archive_index PROPERTIES LABELS unit)
+
+add_executable(disc_cue_tests
+    disc_cue_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/disc_cue.c)
+target_include_directories(disc_cue_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(disc_cue_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME disc_cue COMMAND disc_cue_tests)
+set_tests_properties(disc_cue PROPERTIES LABELS unit)
+
+add_executable(main_loop_frame_tests
+    main_loop_frame_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/boot/main_loop.c)
+target_include_directories(main_loop_frame_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(main_loop_frame_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(main_loop_frame_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(main_loop_frame_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME main_loop_frame COMMAND main_loop_frame_tests)
+set_tests_properties(main_loop_frame PROPERTIES LABELS functional)
+
+add_executable(game_logic_tests
+    game_logic_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/input_config.c
+    ${CMAKE_SOURCE_DIR}/src/port/port_config.c
+    ${CMAKE_SOURCE_DIR}/src/port/runtime_config.c
+    ${CMAKE_SOURCE_DIR}/src/port/runtime_parse.c
+    ${CMAKE_SOURCE_DIR}/src/port/game_diagnostics.c
+    ${CMAKE_SOURCE_DIR}/src/port/platform_paths.c
+)
+target_link_libraries(game_logic_tests PRIVATE rage-sim)
+if(APPLE)
+    target_link_libraries(game_logic_tests PRIVATE "-framework CoreFoundation")
+endif()
+
+target_include_directories(game_logic_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/support/include
+    ${CMAKE_SOURCE_DIR}/src/port
+)
+
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(game_logic_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+if(RAGE_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(game_logic_tests PRIVATE
+        -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(game_logic_tests PRIVATE -fsanitize=address,undefined)
+endif()
+
+add_test(NAME game_logic COMMAND game_logic_tests)
+set_tests_properties(game_logic PROPERTIES LABELS functional)
+
+add_test(NAME architecture_boundaries
+    COMMAND source_contract_tests architecture_boundaries ${CMAKE_SOURCE_DIR})
+set_tests_properties(architecture_boundaries PROPERTIES LABELS functional)
+
+add_executable(content_options_tests
+    content_options_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/content_options.c)
+target_include_directories(content_options_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(content_options_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME content_options COMMAND content_options_tests)
+
+set_tests_properties(content_options PROPERTIES LABELS functional)
+add_executable(image_upload_tests
+    image_upload_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/image_upload.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/install_track_texture_assets.c)
+target_compile_definitions(image_upload_tests PRIVATE __psyz=1)
+target_include_directories(image_upload_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/support/image_upload
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(image_upload_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME image_upload COMMAND image_upload_tests)
+set_tests_properties(image_upload PROPERTIES LABELS unit)
+
+add_executable(native_mesh_writer_tests native_mesh_writer_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/native_mesh_writer.c)
+target_link_libraries(native_mesh_writer_tests PRIVATE rage-rmesh)
+target_include_directories(native_mesh_writer_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(native_mesh_writer_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(native_mesh_writer_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h" /W4 /WX)
+else()
+    target_compile_options(native_mesh_writer_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME native_mesh_writer COMMAND native_mesh_writer_tests)
+set_tests_properties(native_mesh_writer PROPERTIES LABELS unit)
+add_executable(native_terrain_material_tests native_terrain_material_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/native_mesh_writer.c)
+target_include_directories(native_terrain_material_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(native_terrain_material_tests PRIVATE __psyz=1)
+target_link_libraries(native_terrain_material_tests PRIVATE rage-rmesh)
+target_compile_options(native_terrain_material_tests PRIVATE
+    ${RAGE_STRICT_WARNING_OPTIONS}
+    "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+add_test(NAME native_terrain_material COMMAND native_terrain_material_tests)
+set_tests_properties(native_terrain_material PROPERTIES LABELS unit)
+
+add_executable(native_asset_loader_tests
+    native_asset_loader_tests.c
+    ${CMAKE_SOURCE_DIR}/src/content/car_bank.c
+    ${CMAKE_SOURCE_DIR}/src/port/native_asset_loader.c)
+target_include_directories(native_asset_loader_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(native_asset_loader_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(native_asset_loader_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(native_asset_loader_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME native_asset_loader COMMAND native_asset_loader_tests)
+set_tests_properties(native_asset_loader PROPERTIES LABELS unit)
+
+add_executable(relocate_car_model_tests
+    relocate_car_model_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/relocate_car_model.c)
+target_include_directories(relocate_car_model_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(relocate_car_model_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(relocate_car_model_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(relocate_car_model_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME relocate_car_model COMMAND relocate_car_model_tests)
+set_tests_properties(relocate_car_model PROPERTIES LABELS unit)
+
+add_executable(car_model_loading_tests
+    car_model_loading_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/host_state_car_catalog.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/car/car_catalog.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/asset_request.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/car_model_loading.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/car_assets.c)
+target_include_directories(car_model_loading_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(car_model_loading_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(car_model_loading_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(car_model_loading_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME car_model_loading COMMAND car_model_loading_tests)
+set_tests_properties(car_model_loading PROPERTIES LABELS unit)
+
+add_executable(fmv_requests_tests
+    fmv_requests_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/asset_request.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/service_asset_load.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/track_data_assets.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/fmv/select_fmv_stream.c)
+target_include_directories(fmv_requests_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(fmv_requests_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(fmv_requests_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(fmv_requests_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME fmv_requests COMMAND fmv_requests_tests)
+set_tests_properties(fmv_requests PROPERTIES LABELS unit)
+
+add_executable(fmv_stream_index_tests
+    fmv_stream_index_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/fmv_stream_index.c)
+target_include_directories(fmv_stream_index_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(fmv_stream_index_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(fmv_stream_index_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(fmv_stream_index_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME fmv_stream_index COMMAND fmv_stream_index_tests)
+set_tests_properties(fmv_stream_index PROPERTIES LABELS unit)
+
+add_executable(fmv_audio_tests
+    fmv_audio_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/fmv_audio.c)
+target_include_directories(fmv_audio_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(fmv_audio_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(fmv_audio_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(fmv_audio_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME fmv_audio COMMAND fmv_audio_tests)
+set_tests_properties(fmv_audio PROPERTIES LABELS unit)
+
+add_executable(fmv_str_tests
+    fmv_str_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/fmv_str.c)
+target_include_directories(fmv_str_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/port)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(fmv_str_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME fmv_str COMMAND fmv_str_tests)
+set_tests_properties(fmv_str PROPERTIES LABELS unit)
+
+add_executable(fmv_scene_tests
+    fmv_scene_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/fmv/fmv_scene.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/fmv/fmv_disc.c)
+target_include_directories(fmv_scene_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(fmv_scene_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(fmv_scene_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(fmv_scene_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME fmv_scene COMMAND fmv_scene_tests)
+set_tests_properties(fmv_scene PROPERTIES LABELS unit)
+
+add_executable(fmv_return_tests
+    fmv_return_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/fmv/fmv_return.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/fmv/fmv_disc.c)
+target_include_directories(fmv_return_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(fmv_return_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(fmv_return_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(fmv_return_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME fmv_return COMMAND fmv_return_tests)
+set_tests_properties(fmv_return PROPERTIES LABELS unit)
+
+add_executable(audio_settings_tests
+    audio_settings_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/audio/audio_settings.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/audio/sequence_volume.c)
+target_include_directories(audio_settings_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(audio_settings_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(audio_settings_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(audio_settings_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME audio_settings COMMAND audio_settings_tests)
+set_tests_properties(audio_settings PROPERTIES LABELS unit)
+
+add_executable(race_asset_loading_tests
+    race_asset_loading_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/car_catalog.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/asset_request.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/race_assets.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/track_data_assets.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/install_track_texture_assets.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/install_track_runtime_assets.c)
+target_link_libraries(race_asset_loading_tests PRIVATE rage-content rage-car-catalog)
+target_include_directories(race_asset_loading_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/src/port
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(race_asset_loading_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(race_asset_loading_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(race_asset_loading_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME race_asset_loading COMMAND race_asset_loading_tests)
+set_tests_properties(race_asset_loading PROPERTIES LABELS unit)
+
+# The bytes themselves, which the manifest above cannot see.
+add_executable(host_state_content_tests
+    host_state_content_tests.c
+    ${RAGE_HOST_STATE_SOURCES})
+target_include_directories(host_state_content_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include)
+target_compile_definitions(host_state_content_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(host_state_content_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include")
+endif()
+add_test(NAME host_state_content COMMAND host_state_content_tests)
+set_tests_properties(host_state_content PROPERTIES LABELS functional)
+
+add_executable(host_state_abi_tests
+    host_state_abi_asset.c
+    host_state_abi_audio.c
+    host_state_abi_car.c
+    host_state_abi_cd.c
+    host_state_abi_fmv.c
+    host_state_abi_forbidden.c
+    host_state_abi_menu.c
+    host_state_abi_native.c
+    host_state_abi_pad.c
+    host_state_abi_race.c
+    host_state_abi_render.c
+    host_state_abi_save.c
+    host_state_abi_shared.c
+    host_state_abi_track.c)
+target_include_directories(host_state_abi_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include)
+target_compile_definitions(host_state_abi_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(host_state_abi_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME host_state_abi COMMAND host_state_abi_tests)
+set_tests_properties(host_state_abi PROPERTIES LABELS functional)
+
+add_executable(native_ui_script_tests
+    native_ui_script_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/native_game_state.c
+    ${CMAKE_SOURCE_DIR}/src/port/native_initialized_state.c)
+target_include_directories(native_ui_script_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include)
+target_compile_definitions(native_ui_script_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(native_ui_script_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        -fcommon ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME native_ui_scripts COMMAND native_ui_script_tests)
+set_tests_properties(native_ui_scripts PROPERTIES LABELS functional)
+
+add_executable(native_initialized_state_tests
+    native_initialized_state_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/native_game_state.c
+    ${CMAKE_SOURCE_DIR}/src/port/native_initialized_state.c)
+target_include_directories(native_initialized_state_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include)
+target_compile_definitions(native_initialized_state_tests PRIVATE __psyz=1)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(native_initialized_state_tests PRIVATE
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include"
+        "${RAGE_QUOTE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/include"
+        -fcommon ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME native_initialized_state COMMAND native_initialized_state_tests)
+set_tests_properties(native_initialized_state PROPERTIES LABELS functional)
+
+add_executable(load_buffer_bounds_tests
+    load_buffer_bounds_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/host_state_asset.c)
+target_include_directories(load_buffer_bounds_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/port/include)
+add_test(NAME load_buffer_bounds COMMAND load_buffer_bounds_tests)
+set_tests_properties(load_buffer_bounds PROPERTIES LABELS unit)
+
+add_executable(disc_stage_validation_tests disc_stage_validation_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/disc_stage_validation.c)
+target_include_directories(disc_stage_validation_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port)
+if(MSVC)
+    target_compile_options(disc_stage_validation_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(disc_stage_validation_tests PRIVATE
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME disc_stage_validation COMMAND disc_stage_validation_tests)
+set_tests_properties(disc_stage_validation PROPERTIES LABELS unit)
+
+add_executable(shipped_config_tests shipped_config_tests.c)
+target_compile_options(shipped_config_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+if(MSVC)
+    target_compile_definitions(shipped_config_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+add_test(NAME shipped_config_policy COMMAND shipped_config_tests --self-test)
+set_tests_properties(shipped_config_policy PROPERTIES LABELS unit)
+add_test(NAME shipped_config COMMAND shipped_config_tests ${CMAKE_SOURCE_DIR}/rage-port.ini)
+
+set_tests_properties(shipped_config PROPERTIES LABELS functional)
+if(APPLE AND TARGET rage-racer)
+    add_test(NAME macos_build_launcher COMMAND ${CMAKE_COMMAND}
+        -DLAUNCHER=${CMAKE_BINARY_DIR}/rage-racer
+        -DEXECUTABLE=$<TARGET_FILE:rage-racer>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_macos_build_launcher.cmake)
+    set_tests_properties(macos_build_launcher PROPERTIES LABELS functional)
+endif()
+
+# These tests need neither a staged disc image nor a windowing session and are
+# therefore safe in every release-packaging job. Runtime tests below exercise
+# the real PAL data in local/pre-release validation instead.
+add_executable(timing_restore_tests timing_restore_tests.c ${CMAKE_SOURCE_DIR}/src/port/timing_restore.c)
+target_link_libraries(timing_restore_tests PRIVATE rage-content)
+target_include_directories(timing_restore_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/port ${CMAKE_SOURCE_DIR}/src/port/include)
+add_test(NAME timing_restore COMMAND timing_restore_tests)
+set_tests_properties(timing_restore PROPERTIES LABELS functional)
+
+if(TARGET rage-racer-smoke)
+    add_test(NAME runtime_config COMMAND ${CMAKE_COMMAND}
+        -DFIXTURE=$<TARGET_FILE:native_asset_fixture> -DGAME=$<TARGET_FILE:rage-racer-smoke>
+        -DSOURCE=${PROJECT_SOURCE_DIR} -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_runtime_config.cmake)
+    set_tests_properties(runtime_config PROPERTIES LABELS e2e TIMEOUT 180)
+    add_test(
+        NAME diagnostic_log
+        COMMAND ${CMAKE_COMMAND}
+            -DGAME=$<TARGET_FILE:rage-racer-smoke>
+            -DSOURCE=${CMAKE_SOURCE_DIR} -DOUTPUT_ROOT=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_diagnostic_log.cmake
+    )
+set_tests_properties(diagnostic_log PROPERTIES LABELS e2e)
+    set_tests_properties(diagnostic_log PROPERTIES TIMEOUT 60)
+    add_test(
+        NAME window_size
+        COMMAND ${CMAKE_COMMAND} -DGAME=$<TARGET_FILE:rage-racer-smoke>
+            -DSOURCE=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_window_size.cmake
+    )
+set_tests_properties(window_size PROPERTIES LABELS e2e)
+    set_tests_properties(window_size PROPERTIES TIMEOUT 60)
+    find_program(RAGE_XDOTOOL xdotool)
+    if(RAGE_XDOTOOL)
+        add_executable(window_lifecycle_tests window_lifecycle_tests.c)
+        if(MSVC)
+            target_compile_options(window_lifecycle_tests PRIVATE /W4 /WX)
+        else()
+            target_compile_options(window_lifecycle_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+        endif()
+        add_test(
+            NAME window_lifecycle
+            COMMAND window_lifecycle_tests
+                $<TARGET_FILE:rage-racer-smoke>
+                ${CMAKE_SOURCE_DIR}
+        )
+set_tests_properties(window_lifecycle PROPERTIES LABELS e2e)
+        set_tests_properties(window_lifecycle PROPERTIES TIMEOUT 195)
+    endif()
+endif()
+add_executable(asset_requests_tests
+    asset_requests_tests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/asset_request.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/asset_requests.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/option_screen_assets.c
+    ${CMAKE_SOURCE_DIR}/src/main/PAL/main/asset/round_screen_assets.c)
+target_include_directories(asset_requests_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/support/image_upload
+    ${CMAKE_SOURCE_DIR}/src/port/include
+    ${CMAKE_SOURCE_DIR}/external/psyz/psyz/include
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(asset_requests_tests PRIVATE __psyz=1)
+if(MSVC)
+    target_compile_options(asset_requests_tests PRIVATE
+        "/FI${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h")
+else()
+    target_compile_options(asset_requests_tests PRIVATE
+        "${RAGE_FORCE_INCLUDE_OPTION}${CMAKE_SOURCE_DIR}/src/port/include/rage/compat.h"
+        ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+target_link_libraries(asset_requests_tests PRIVATE psyz)
+add_test(NAME asset_requests COMMAND asset_requests_tests)
+set_tests_properties(asset_requests PROPERTIES LABELS unit)
+
+add_executable(native_visibility_tests native_visibility_tests.c
+    ${CMAKE_SOURCE_DIR}/src/port/native_visibility.c)
+target_include_directories(native_visibility_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/port)
+target_compile_options(native_visibility_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+add_test(NAME native_visibility COMMAND native_visibility_tests)
+set_tests_properties(native_visibility PROPERTIES LABELS unit)
+
+add_executable(fmv_zoom_tests fmv_zoom_tests.c ${CMAKE_SOURCE_DIR}/src/port/fmv_zoom.c)
+target_include_directories(fmv_zoom_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/port)
+if(NOT MSVC)
+    target_compile_options(fmv_zoom_tests PRIVATE ${RAGE_STRICT_WARNING_OPTIONS})
+endif()
+add_test(NAME fmv_zoom COMMAND fmv_zoom_tests)
+set_tests_properties(fmv_zoom PROPERTIES LABELS unit)
